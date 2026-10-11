@@ -24,6 +24,22 @@ func (d *DB) InsertLog(level, tag, text string) (int64, error) {
 	return id, err
 }
 
+// ClearLogs deletes every persisted backend log row and reports how many rows
+// were removed. Callers pair it with dropping the in-memory ring (see
+// server.logSinkT.Clear) so a cleared /logs page can't be repopulated from
+// history on the next reconnect.
+func (d *DB) ClearLogs() (int64, error) {
+	res, err := d.Exec(`DELETE FROM server_logs`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // RecentLogs returns the most recent limit rows, oldest-first.
 func (d *DB) RecentLogs(limit int) ([]*DBLog, error) {
 	rows, err := d.QueryContext(context.Background(),

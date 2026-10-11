@@ -755,6 +755,8 @@ export interface LogLine {
   level: "info" | "warn" | "error";
   tag: string;
   text: string;
+  // 清空信号帧（SSE）：后端把日志整体清了，收到后丢弃本地已缓存的行，不要当普通日志追加。
+  cleared?: boolean;
 }
 
 export type SessionRole = "mainagent" | "planner" | "worker" | "system";
@@ -912,6 +914,9 @@ export interface Settings {
   traffic_capture: boolean;
   agent_traffic_binding: boolean; // Agent 自动绑定流量证据，默认关闭；不影响人工绑定
   llm_record: boolean; // LLM 录制开关（默认关）；关闭时不记录任何 LLM 调用
+  // 任务终态自动清日志（默认开）：任务进入 done/failed/timeout 时清空后端日志
+  // （server_logs + 内存缓冲），成功与失败一视同仁。
+  clear_logs_on_task_end?: boolean;
   // Web search. brave_key_set / tavily_key_set reflect whether a key is stored
   // (the values are never returned). On PUT, send the corresponding field to set/clear.
   web_search_enabled: boolean;

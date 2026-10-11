@@ -275,6 +275,9 @@ const (
 	// agent(planner/worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction。
 	// 每 run 读一次,切换只影响之后启动的 run。
 	settingNoaCompaction = "noa_compaction"
+	// 任务终态自动清日志:任务进入终态(done/failed/timeout)时清空后端日志
+	// (server_logs + 内存缓冲)。默认开——成功与失败一视同仁,跑完不留日志。
+	settingClearLogsOnTaskEnd = "clear_logs_on_task_end"
 	// defaultWebSearchBackend is used when web search is on but no backend was picked.
 	defaultWebSearchBackend = "ddgs"
 	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
@@ -1380,14 +1383,16 @@ func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
 // (resolves the completed↔timeout race — first terminal writer wins). Reflects the
 // won status on the live handle. won=false means another terminal already stuck.
 func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) {
+	prev := m.TaskStatus(id)
 	m.taskStateMu.Lock()
-	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
+		m.taskStateMu.Unlock()
 		return false, err
 	}
 	won, err = m.pg.SetTerminalStatusGuarded(n, status)
 	if err != nil || !won {
+		m.taskStateMu.Unlock()
 		return won, err
 	}
 	m.mu.Lock()
@@ -1400,19 +1405,25 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 		})
 	}
 	m.mu.Unlock()
+	m.taskStateMu.Unlock()
+	// After releasing taskStateMu: clearing hits PostgreSQL, and a slow DELETE
+	// must not hold the lifecycle write lock.
+	m.clearLogsOnTaskEnd(prev, status)
 	return true, nil
 }
 
 // SetTaskStatus persists a task's lifecycle status (e.g. "done") and reflects it
 // on the in-memory handle so the derived DTO status shows it without a reload.
 func (m *Manager) SetTaskStatus(id, status string) error {
+	prev := m.TaskStatus(id)
 	m.taskStateMu.Lock()
-	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
+		m.taskStateMu.Unlock()
 		return err
 	}
 	if err := m.pg.SetStatus(n, status); err != nil {
+		m.taskStateMu.Unlock()
 		return err
 	}
 	m.mu.Lock()
@@ -1431,7 +1442,44 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 		})
 	}
 	m.mu.Unlock()
+	m.taskStateMu.Unlock()
+	m.clearLogsOnTaskEnd(prev, status)
 	return nil
+}
+
+// LogsClearOnTaskEnd reports whether a finished task wipes the backend log store
+// (settings.clear_logs_on_task_end, default on).
+func (m *Manager) LogsClearOnTaskEnd() bool {
+	if m.pg == nil {
+		return false // no DB → no persisted log to clear
+	}
+	return m.pg.GetBool(settingClearLogsOnTaskEnd, true)
+}
+
+// shouldClearLogsOnTerminal reports whether a status change crosses INTO a
+// terminal state (done / failed / timeout) and should therefore wipe the log
+// store. Success and failure are treated alike; rewrites of an already-terminal
+// status (completed_at bookkeeping, re-run of a done task) do not clear again.
+func shouldClearLogsOnTerminal(prev, next string) bool {
+	return pgdb.IsTerminal(next) && !pgdb.IsTerminal(prev)
+}
+
+// clearLogsOnTaskEnd wipes the backend log (ring + server_logs + open /logs
+// pages) when a task reaches a terminal state, so a finished run leaves no log
+// trail behind. Gated by settings.clear_logs_on_task_end.
+func (m *Manager) clearLogsOnTaskEnd(prev, next string) {
+	if !shouldClearLogsOnTerminal(prev, next) {
+		return
+	}
+	if !m.LogsClearOnTaskEnd() {
+		return
+	}
+	deleted, err := logSink.Clear()
+	if err != nil {
+		log.Printf("[logs] task 进入终态 %s 后清空日志失败（内存已清空，DB 未删净）: %v", next, err)
+		return
+	}
+	log.Printf("[logs] task 终态 %s，已自动清空后端日志 %d 行", next, deleted)
 }
 
 // DeleteTask removes a task and optionally its related global data. Traffic has

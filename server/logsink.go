@@ -20,6 +20,10 @@ type LogLine struct {
 	Level string `json:"level"` // info | warn | error
 	Tag   string `json:"tag"`   // the leading [tag] (pg / planner / activity / …), if any
 	Text  string `json:"text"`
+	// Cleared marks the synthetic frame pushed when the whole log store is wiped
+	// (see logSinkT.Clear). It carries no log text: subscribers drop everything
+	// they have rendered instead of appending it.
+	Cleared bool `json:"cleared,omitempty"`
 }
 
 // dbWriteReq carries a log line to the async DB writer.
@@ -39,6 +43,12 @@ type logSinkT struct {
 	subs map[chan LogLine]struct{}
 	out  io.Writer // passthrough (stderr)
 
+	// clearedUpTo is the highest seq dropped by the last Clear. Queued DB writes
+	// for lines at or below it are discarded instead of being inserted after the
+	// DELETE — otherwise in-flight pre-clear lines would reappear in history.
+	clearedUpTo int64
+
+	pg     *db.DB // nil until SetDB; needed to delete persisted rows on Clear
 	dbOnce sync.Once
 	dbCh   chan dbWriteReq // buffered async channel; nil until SetDB is called
 }
@@ -61,6 +71,7 @@ func (s *logSinkT) SetDB(ctx context.Context, pg *db.DB) {
 		ch := make(chan dbWriteReq, 2000)
 		s.mu.Lock()
 		s.dbCh = ch
+		s.pg = pg
 		s.mu.Unlock()
 
 		// Restore last 100 rows from DB → prepend to ring as history context.
@@ -94,6 +105,9 @@ func (s *logSinkT) SetDB(ctx context.Context, pg *db.DB) {
 				case req, ok := <-ch:
 					if !ok {
 						return
+					}
+					if !s.shouldPersist(req.seq) {
+						continue // emitted before the last Clear; the row was deleted
 					}
 					id, err := pg.InsertLog(req.ll.Level, req.ll.Tag, req.ll.Text)
 					if err != nil {
@@ -156,6 +170,54 @@ func (s *logSinkT) add(l LogLine) {
 		default:
 		}
 	}
+}
+
+// Clear wipes the whole backend log: drops the in-memory ring, deletes the
+// persisted rows, and pushes a cleared frame to live subscribers so an open
+// /logs page empties immediately instead of keeping lines the server no longer
+// has. Lines already queued for persistence are dropped too (shouldPersist), so
+// a pre-clear line can't be written back after the DELETE.
+//
+// The seq counter is deliberately NOT reset: SSE clients resume with
+// ?since=<seq>, and a reset would make every new line look older than the
+// cursor they reconnect with — they would silently never receive it again.
+// deleted counts the rows removed from the DB (0 when no DB is wired yet).
+func (s *logSinkT) Clear() (deleted int64, err error) {
+	s.mu.Lock()
+	s.clearedUpTo = s.seq
+	s.ring = nil
+	pg := s.pg
+	s.seq++ // fresh seq: clients dedupe by seq, the frame must not collide
+	frame := LogLine{
+		Seq:     s.seq,
+		TS:      time.Now().Format(time.RFC3339),
+		Level:   "info",
+		Tag:     "logsink",
+		Text:    "[logsink] 日志已清空",
+		Cleared: true,
+	}
+	// Non-blocking sends, so holding the lock can't stall a slow subscriber.
+	for sub := range s.subs {
+		select {
+		case sub <- frame:
+		default:
+		}
+	}
+	s.mu.Unlock()
+
+	if pg != nil {
+		deleted, err = pg.ClearLogs()
+	}
+	return deleted, err
+}
+
+// shouldPersist reports whether a queued line still belongs in the log store:
+// lines emitted before the last Clear are dropped rather than inserted, which
+// would resurrect them in the DB history right after the DELETE.
+func (s *logSinkT) shouldPersist(seq int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return seq > s.clearedUpTo
 }
 
 // recent returns ring lines with Seq > since (capped to limit), and the latest seq.

@@ -1,9 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { Input } from "@/components/ui/input";
+
+import Link from "next/link";
+
+import { toast } from "sonner";
+
 import { Button } from "@/components/ui/button";
-import { sseUrl } from "@/lib/api";
+import { Input } from "@/components/ui/input";
+import { api, sseUrl } from "@/lib/api";
 import { MOCK } from "@/lib/mock/enabled";
 import type { LogLine } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -66,9 +71,16 @@ export default function LogsPage() {
     }
     const es = new EventSource(sseUrl("/api/logs/stream?since=0"));
     es.onmessage = (e) => {
-      if (pausedRef.current) return;
       try {
         const l = JSON.parse(e.data) as LogLine;
+        // 后端清空日志的信号帧：判断放在暂停之前——服务端已经把这些行删了，
+        // 本地留着只会误导；清掉本地缓存并复位「加载更早日志」的游标。
+        if (l.cleared) {
+          setLines([]);
+          setHasMore(false);
+          return;
+        }
+        if (pausedRef.current) return;
         setLines((prev) => (prev.some((x) => x.seq === l.seq) ? prev : [...prev, l].slice(-3000)));
       } catch {
         /* ignore malformed frame */
@@ -116,6 +128,18 @@ export default function LogsPage() {
     }
   }
 
+  // 手动清空：走 POST /api/logs/clear 真删（内存缓冲 + server_logs），其它打开的
+  // 日志页会通过 SSE 的 cleared 帧同步清屏。清掉本地状态是立即的，请求失败再提示。
+  const clearLogs = React.useCallback(() => {
+    setLines([]);
+    setHasMore(false);
+    if (MOCK) return;
+    api
+      .clearLogs()
+      .then((r) => toast.success(r.deleted ? `已清空后端日志（删除 ${r.deleted} 行）` : "已清空后端日志"))
+      .catch((e) => toast.error("清空失败：" + (e as Error).message));
+  }, []);
+
   const filtered = React.useMemo(() => {
     const needle = q.trim().toLowerCase();
     return lines.filter(
@@ -143,7 +167,13 @@ export default function LogsPage() {
     <div className="flex flex-1 flex-col gap-3">
       <div>
         <h1 className="text-xl font-semibold tracking-tight">系统日志</h1>
-        <p className="text-muted-foreground text-sm">后端实时日志流(planner / worker / 数据库 / 流量 …)</p>
+        <p className="text-muted-foreground text-sm">
+          后端实时日志流(planner / worker / 数据库 / 流量 …)。任务进入终态(done / failed / timeout)后会自动清空，可在
+          <Link className="underline underline-offset-2" href="/system/settings">
+            系统配置
+          </Link>
+          里关闭。
+        </p>
       </div>
       <div className="flex flex-1 flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
@@ -174,8 +204,14 @@ export default function LogsPage() {
           >
             {paused ? "已暂停" : "暂停"}
           </Button>
-          <Button size="sm" variant="outline" className="h-8" onClick={() => setLines([])}>
-            清空
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8"
+            onClick={clearLogs}
+            title="清空后端日志（内存 + 数据库），其它打开的日志页一起清屏"
+          >
+            清空日志
           </Button>
           <span className="ml-auto text-xs text-muted-foreground">
             {counts.total} 行 ·{" "}

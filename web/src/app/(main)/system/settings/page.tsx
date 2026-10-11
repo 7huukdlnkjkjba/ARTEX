@@ -2,7 +2,15 @@
 
 import * as React from "react";
 
-import { CpuIcon, FlaskConicalIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
+import {
+  CpuIcon,
+  FlaskConicalIcon,
+  KeyboardIcon,
+  RadioTowerIcon,
+  ScrollTextIcon,
+  SearchIcon,
+  ShieldAlertIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -43,6 +51,8 @@ export default function SystemSettingsPage() {
   const [injectWorker, setInjectWorker] = React.useState(true);
   // 实验功能:noa 上下文压缩(默认关)。
   const [noaCompaction, setNoaCompaction] = React.useState(false);
+  // 任务终态自动清日志(默认开)。
+  const [clearLogsOnTaskEnd, setClearLogsOnTaskEnd] = React.useState(true);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
@@ -60,6 +70,7 @@ export default function SystemSettingsPage() {
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
+    setClearLogsOnTaskEnd(s.clear_logs_on_task_end !== false);
   }, []);
 
   const saveWorkers = () => {
@@ -159,6 +170,20 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => {
         setNoaCompaction(!v); // revert on failure
+        toast.error(`保存失败：${(e as Error).message}`);
+      });
+  };
+
+  const toggleClearLogsOnTaskEnd = (v: boolean) => {
+    setClearLogsOnTaskEnd(v); // optimistic
+    api
+      .setSettings({ clear_logs_on_task_end: v })
+      .then((s) => {
+        apply(s);
+        toast.success(v ? "已开启：任务跑完（含失败）即清空后端日志" : "已关闭：任务跑完保留日志");
+      })
+      .catch((e) => {
+        setClearLogsOnTaskEnd(!v); // revert on failure
         toast.error(`保存失败：${(e as Error).message}`);
       });
   };
@@ -401,6 +426,33 @@ export default function SystemSettingsPage() {
                 onCheckedChange={toggleInjectWorker}
               />
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ScrollTextIcon className="size-4" />
+              任务跑完自动清日志
+            </CardTitle>
+            <CardDescription>
+              默认开启。任务进入<b>终态</b>（目标达成 done / 失败 failed / 超时 timeout）时，清空后端日志：数据库
+              server_logs 与内存缓冲一起删，<b>成功与失败一视同仁</b>，跑完不留日志，「系统 → 日志」页面会立即清屏。
+              <br />
+              <b>注意</b>：日志是全局的、不按任务隔离，清空会一并清掉同一时刻其它在跑任务的日志。
+              需要排查问题时请关闭此项。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="clear-logs-on-task-end" className="text-sm font-normal text-muted-foreground">
+              {clearLogsOnTaskEnd ? "已开启 · 任务终态即清空日志" : "已关闭 · 日志持续保留"}
+            </Label>
+            <Switch
+              id="clear-logs-on-task-end"
+              checked={clearLogsOnTaskEnd}
+              disabled={!loaded}
+              onCheckedChange={toggleClearLogsOnTaskEnd}
+            />
           </CardContent>
         </Card>
 

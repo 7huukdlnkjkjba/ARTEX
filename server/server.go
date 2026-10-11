@@ -662,6 +662,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
+	mux.HandleFunc("POST /api/logs/clear", s.clearLogs)
 
 	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
 	// /api/health），所以这几个改动程序自身的接口天然需要登录。
@@ -2883,6 +2884,19 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": lines, "cursor": cursor})
 }
 
+// clearLogs wipes the backend log on demand: the in-memory ring, the persisted
+// server_logs rows, and every open /logs page (via the cleared SSE frame). The
+// automatic task-end wipe shares the same path; this one is explicit and ignores
+// the settings toggle. POST /api/logs/clear → {deleted: n}.
+func (s *Server) clearLogs(w http.ResponseWriter, r *http.Request) {
+	deleted, err := logSink.Clear()
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deleted": deleted})
+}
+
 // getLogsHistory returns older log lines from the DB (before a given db_id).
 // GET /api/logs/history?before=<db_id>&limit=200
 // Returns {items:[LogLine], has_more: bool}.
@@ -3293,6 +3307,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"traffic_capture":          s.m.TrafficEnabled(),
 		"agent_traffic_binding":    s.m.pg.GetBool(settingAgentTrafficBinding, false),
 		"llm_record":               s.m.LLMRecordEnabled(),
+		"clear_logs_on_task_end":   s.m.LogsClearOnTaskEnd(), // 任务终态自动清日志(默认开)
 		"web_search_enabled":       on,
 		"web_search_backend":       backend,
 		"brave_key_set":            strings.TrimSpace(braveKey) != "",
@@ -3363,6 +3378,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		TrafficCapture      *bool `json:"traffic_capture"`
 		AgentTrafficBinding *bool `json:"agent_traffic_binding"`
 		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
+		// 任务终态自动清日志（默认开）：任务进入 done/failed/timeout 时清空后端日志。
+		// 每次终态转换实时读，改完即时生效，无需重建 agent 或重启。
+		ClearLogsOnTaskEnd *bool `json:"clear_logs_on_task_end"`
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
 		WebSearchEnabled *bool   `json:"web_search_enabled"`
@@ -3506,6 +3524,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AgentTrafficBinding != nil {
 		if err := s.m.pg.SetBool(settingAgentTrafficBinding, *req.AgentTrafficBinding); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	// 任务终态自动清日志：每次终态转换现读，所以即时生效、无需重建 agent。
+	if req.ClearLogsOnTaskEnd != nil {
+		if err := s.m.pg.SetBool(settingClearLogsOnTaskEnd, *req.ClearLogsOnTaskEnd); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

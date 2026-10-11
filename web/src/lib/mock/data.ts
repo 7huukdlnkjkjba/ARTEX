@@ -3338,6 +3338,7 @@ export const settings: Settings = {
   llm_pool_enabled: true,
   llm_pool_bind_fallback: false,
   noa_compaction: false,
+  clear_logs_on_task_end: true,
 };
 
 // ── LLM 轮询（故障转移）──────────────────────────────────────────────────────

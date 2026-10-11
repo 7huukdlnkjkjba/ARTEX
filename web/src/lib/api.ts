@@ -904,6 +904,8 @@ export const api = {
   },
   stopChat: (taskId: string) => post<{ status: string }>(`/tasks/${taskId}/chat/stop`, {}),
   gc: (ttl = 86400) => post<{ removed: number }>(`/gc?ttl=${ttl}`, {}),
+  // 后端日志整体清空（内存缓冲 + server_logs），所有打开的日志页会一起清屏。
+  clearLogs: () => post<{ deleted: number }>("/logs/clear", {}),
 
   // ---- LLM ----
   getLLM: () =>
