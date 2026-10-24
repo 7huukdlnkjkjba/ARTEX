@@ -233,6 +233,32 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 **LLM**：`export ANTHROPIC_API_KEY=sk-...`（或 `OPENAI_API_KEY`），也可在 UI 的「LLM 配置」页填写。
 可选：`ARTEX_LLM_PROVIDER` / `ARTEX_LLM_MODEL` / `ARTEX_LLM_BASE_URL` / `ARTEX_LLM_PROXY`。
 
+### 本地 AI（Ollama / LM Studio / llama.cpp / vLLM）
+
+ARTEX 走 OpenAI Chat Completions 兼容协议，所以本地模型服务可以直接接，**不需要 API Key**：
+
+```bash
+# Ollama（先 ollama serve && ollama pull qwen2.5:7b）
+export ARTEX_LLM_PROVIDER=openai            # 也可写 ollama/local
+export ARTEX_LLM_BASE_URL=http://127.0.0.1:11434/v1
+export ARTEX_LLM_MODEL=qwen2.5:7b
+# 关键：不设置 ANTHROPIC_API_KEY / OPENAI_API_KEY
+./start.sh
+```
+
+UI 里更简单：**系统 → LLM 配置 → 新建**，格式选「OpenAI 兼容」，
+点 `Ollama` / `LM Studio` / `llama.cpp` / `vLLM` 预设，模型点右侧刷新按钮从 `/models` 拉取，
+API Key 留空，保存后「设为激活」即可。
+
+- 识别为本地/LAN 的 Base URL：`localhost`、`127.0.0.1`、`::1`、`10/8`、`172.16–31`、`192.168/16`、
+  `*.local` / `*.lan` / `*.internal`、`host.docker.internal`，以及不带点的 compose 服务名（如 `ollama`）。
+- 本地端点会自动使用占位 Key（`local`），避免某些 OpenAI 兼容网关拒绝空的 `Authorization` 头；
+  云端点仍然必须填 Key。
+- 模型必须支持 **OpenAI tool calling**（ARTEX 的 planner/worker 全靠工具调用）：`qwen2.5`、`qwen3`、
+  `llama3.1+`、`mistral-nemo` 等；纯文本模型能连上但跑不动 agent。
+- 7B 模型在长上下文里会变慢，建议在 LLM 配置里把「上下文窗口(K)」设成模型真实值（如 32/128），
+  并适当降低每任务 worker 数。
+
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
 **日志**：任务终态自动清空日志——任务进入 `done` / `failed` / `timeout` 时清空后端日志（内存缓冲 + 数据库 `server_logs`），成功与失败一视同仁；「系统 → 日志」页的「清空日志」按钮也可随时手动清空（内存与数据库一起删，其它打开的日志页同步清屏）。不想自动清空可在「系统配置 → 任务跑完自动清日志」关闭（默认开，切换即时生效）。

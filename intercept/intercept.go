@@ -64,6 +64,12 @@ func WithTaskContext(ctx context.Context, taskID, agentName string, emit func(db
 	return ctx
 }
 
+// TaskInfoFromContext 是 taskInfoFromCtx 的导出包装，供 guard 的范围强制层读取
+// 「这次调用属于哪个任务、哪个 agent」。
+func TaskInfoFromContext(ctx context.Context) (taskID, agentName string) {
+	return taskInfoFromCtx(ctx)
+}
+
 func taskInfoFromCtx(ctx context.Context) (taskID, agentName string) {
 	if v, ok := ctx.Value(taskInfoCtxKey).(taskCtxInfo); ok {
 		return v.taskID, v.agentName

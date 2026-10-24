@@ -61,6 +61,7 @@ import type {
   IntentAsset,
   InterceptApprovalRow,
   Session,
+  SessionCost,
   SessionStatus,
   SessionTokenUsage,
   TaskLLMResolution,
@@ -636,6 +637,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [sseLive, setSseLive] = React.useState(false);
   // Whole-task token total (all agents), polled from the backend aggregate.
   const [taskTokens, setTaskTokens] = React.useState<TokenTotal | null>(null);
+  // 会话预算视角：已用 / 上限（¥）。与后端预算闸门同一份台账与价格表。
+  const [taskCost, setTaskCost] = React.useState<SessionCost | null>(null);
   const [sessionTokens, setSessionTokens] = React.useState<Record<string, SessionTokenUsage>>({});
   const [llmResolutions, setLLMResolutions] = React.useState<TaskLLMResolutions | null>(null);
   // Pending intercept requests for this task — used to show warning icons on sessions.
@@ -788,6 +791,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         .then((r) => {
           if (!alive) return;
           setTaskTokens(r.total);
+          setTaskCost(r.cost ?? null);
           setSessionTokens(Object.fromEntries(r.sessions.map((item) => [item.session, item])));
         })
         .catch(() => {
@@ -1634,12 +1638,32 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       cache={taskTokens.cache_read_tokens}
                       output={taskTokens.output_tokens}
                     />
+                    {taskCost?.enabled && (
+                      <>
+                        <span>·</span>
+                        <span
+                          className={cn(
+                            "tabular-nums",
+                            taskCost.spent_cny >= taskCost.budget_cny && "font-medium text-amber-600",
+                          )}
+                        >
+                          ≈¥{taskCost.spent_cny.toFixed(2)} / 上限 ¥{taskCost.budget_cny.toFixed(2)}
+                        </span>
+                      </>
+                    )}
                   </div>
                 </TooltipTrigger>
                 <TooltipContent>
                   输入 {taskTokens.input_tokens.toLocaleString()} · 输出 {taskTokens.output_tokens.toLocaleString()} ·
                   缓存读取 {taskTokens.cache_read_tokens.toLocaleString()} · 缓存写入{" "}
                   {taskTokens.cache_write_tokens.toLocaleString()}
+                  {taskCost?.enabled && (
+                    <>
+                      <br />
+                      本次会话模型花费 ≈¥{taskCost.spent_cny.toFixed(2)}，剩余 ¥{taskCost.remaining_cny.toFixed(2)}；
+                      达到上限后停止新的模型调用并暂停任务（已写回的结果保留）。
+                    </>
+                  )}
                 </TooltipContent>
               </Tooltip>
             )}

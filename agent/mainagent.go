@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
@@ -33,6 +35,7 @@ type MainAgent struct {
 	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	guard           *guard.Guard                           // 管控钩子（拦截规则 + 授权范围强制）；nil = 不拦
 }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
@@ -80,6 +83,10 @@ func (m *MainAgent) SetWebSearch(o WebSearchOpts) { m.webSearch = o }
 // SetSteerWork wires the engine callback that lets the main agent's steer_work
 // tool inject a mid-run course-correction into a running work (nil = tool off).
 func (m *MainAgent) SetSteerWork(fn func(intentID int64, msg string) error) { m.steerWork = fn }
+
+// SetGuard 挂上管控钩子（拦截规则 + 授权范围强制）。上游快照里 mainagent 完全没有
+// Hooks，而它的工具集含 Bash——人类接口反而是最容易越界的入口。这里补上。
+func (m *MainAgent) SetGuard(g *guard.Guard) { m.guard = g }
 
 // mainAgentDefaultTmpl is the built-in EDITABLE body (段 [A]) of the main agent
 // prompt, seeded into agent_prompts. Goal is a {{.Goal}} template var; the 中间
@@ -131,6 +138,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	mainDir := ensureRunDir(m.workDir, taskID, 0)
 	ctx = intercept.WithReviewWorkingDirectory(ctx, mainDir)
+	// 任务归属注入 ctx：管控层要靠它把调用归到任务上做授权范围判定。
+	ctx = intercept.WithTaskContext(ctx, strconv.FormatInt(taskID, 10), "mainagent", nil)
 	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
@@ -164,9 +173,11 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
+	if m.guard != nil { // 管控钩子（拦截规则 + 授权范围强制）
+		opts.Hooks = m.guard.Hooks()
+	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per segment
-		opts.Transcript = m.tx
-		// Segment 0 keeps the legacy "exp%d-main" name so existing transcripts still
+		opts.Transcript = m.tx		// Segment 0 keeps the legacy "exp%d-main" name so existing transcripts still
 		// load; each new session (seg>=1) gets its own file for a clean context.
 		opts.SessionID = fmt.Sprintf("exp%d-main", ts.ID())
 		if mainSeg > 0 {

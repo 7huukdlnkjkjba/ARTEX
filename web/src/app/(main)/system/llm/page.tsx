@@ -71,15 +71,42 @@ function cooldownText(secs: number) {
   return `${Math.ceil(secs / 60)}min`;
 }
 
-// 一个配置在卡片上显示的「是否正常」。没填 Key 的配置根本发不出请求，比熔断更该先说；
-// 其余状态来自轮询的熔断记录（轮询关着时不会产生新记录，此时「正常」= 没有已知故障）。
+// Local model servers (Ollama / LM Studio / llama.cpp / vLLM) do not need a
+// key. Keep the frontend check in sync with agent.IsLocalEndpoint on the Go
+// side: a local/LAN Base URL is allowed to have an empty Key.
+function isLocalBaseUrl(raw: string | null | undefined): boolean {
+  const s = String(raw ?? "").trim();
+  if (!s) return false;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `http://${s}`;
+  let host = "";
+  try {
+    host = new URL(withScheme).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  } catch {
+    return false;
+  }
+  if (!host) return false;
+  if (
+    ["localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal", "gateway.docker.internal"].includes(host) ||
+    /\.(local|lan|internal|localhost)$/.test(host)
+  ) {
+    return true;
+  }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    const [a, b] = host.split(".").map(Number);
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
+  }
+  return host.includes(":") ? host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80") : !host.includes(".");
+}
+
+// 一个配置在卡片上显示的「是否正常」。没填 Key 的云配置根本发不出请求，比熔断更该先说；
+// 本地端点例外：Ollama / LM Studio 等不需要 Key。
 type Health = { label: string; cls: string; hint?: string };
 function healthOf(p: LLMProfile, m?: LLMPoolMember): Health {
-  if (!p.api_key_hint) {
+  if (!p.api_key_hint && !isLocalBaseUrl(p.base_url)) {
     return {
       label: "未配置 Key",
       cls: "border-muted-foreground/40 text-muted-foreground",
-      hint: "未填 API Key，无法调用",
+      hint: "未填 API Key，无法调用；本地端点可留空",
     };
   }
   if (m?.state === "tripped") {
@@ -415,6 +442,14 @@ function ProfileSheet({
     }
   }
 
+  /** One-click local endpoints: OpenAI wire format, empty Key allowed. */
+  function applyLocalPreset(url: string, modelHint = "") {
+    setFormat("openai");
+    setBaseUrl(url);
+    if (!model.trim() && modelHint) setModel(modelHint);
+    toast.info("已切到本地 OpenAI 兼容端点，Key 可留空");
+  }
+
   async function save() {
     if (!name.trim() || !model.trim()) {
       toast.error("请填写名称与模型");
@@ -498,7 +533,7 @@ function ProfileSheet({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="anthropic">Anthropic</SelectItem>
-                  <SelectItem value="openai">OpenAI (Chat Completions)</SelectItem>
+                  <SelectItem value="openai">OpenAI 兼容（含 Ollama / LM Studio / llama.cpp）</SelectItem>
                   <SelectItem value="openai-responses">OpenAI (Responses API)</SelectItem>
                 </SelectContent>
               </Select>
@@ -511,7 +546,7 @@ function ProfileSheet({
               <Input
                 id="p-model"
                 className="font-mono"
-                placeholder="claude-opus-4-8"
+                placeholder={isLocalBaseUrl(baseUrl) ? "qwen2.5:7b / llama3.1:8b" : "claude-opus-4-8"}
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
               />
@@ -557,10 +592,28 @@ function ProfileSheet({
             <Input
               id="p-base-url"
               className="font-mono"
-              placeholder="https://api.openai.com/v1"
+              placeholder="https://api.openai.com/v1 或 http://127.0.0.1:11434/v1"
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
             />
+            <div className="flex flex-wrap gap-1.5">
+              <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => applyLocalPreset("http://127.0.0.1:11434/v1", "qwen2.5:7b")}>
+                Ollama
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => applyLocalPreset("http://127.0.0.1:1234/v1")}>
+                LM Studio
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => applyLocalPreset("http://127.0.0.1:8080/v1")}>
+                llama.cpp
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => applyLocalPreset("http://127.0.0.1:8000/v1")}>
+                vLLM
+              </Button>
+            </div>
+            <p className="text-muted-foreground text-xs">
+              本地/LAN 端点（localhost、127.0.0.1、10/172.16–31/192.168、*.local、compose 服务名）可以留空 Key；
+              模型需要支持 OpenAI tool calling（qwen2.5、llama3.1+ 等）。
+            </p>
           </div>
 
           <div className="grid gap-2">
@@ -599,10 +652,19 @@ function ProfileSheet({
             <Input
               id="p-api-key"
               type="password"
-              placeholder={keyHint ? `已设置（${keyHint}），留空保持不变` : "sk-…"}
+              placeholder={
+                keyHint
+                  ? `已设置（${keyHint}），留空保持不变`
+                  : isLocalBaseUrl(baseUrl)
+                    ? "本地端点可留空"
+                    : "sk-…"
+              }
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
             />
+            <p className="text-muted-foreground text-xs">
+              本地/LAN 端点留空即可（后端会自动使用占位 key，避免空 Authorization 头被某些网关拒绝）。
+            </p>
           </div>
 
           <div className="grid gap-4 sm:grid-cols-3">

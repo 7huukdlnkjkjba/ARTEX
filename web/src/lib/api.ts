@@ -71,6 +71,7 @@ import type {
   NotificationMeta,
   PromptVar,
   PromptVersion,
+  SessionCost,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -685,12 +686,16 @@ export const api = {
     post<FindingDeepenResponse>(`/exploration/findings/${id}/deepen`, { description }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
   tokenStats: (task?: string) =>
-    get<{ workers: TokenUsage[]; sessions: SessionTokenUsage[]; total: TokenTotal }>(
-      `/exploration/tokens${tq(task)}`,
-    ).then((r) => ({
+    get<{
+      workers: TokenUsage[];
+      sessions: SessionTokenUsage[];
+      total: TokenTotal;
+      cost?: SessionCost;
+    }>(`/exploration/tokens${tq(task)}`).then((r) => ({
       workers: arr(r.workers),
       sessions: arr(r.sessions),
       total: r.total,
+      cost: r.cost,
     })),
   tokenDaily: (days = 30) => get<DailyTokenBucket[]>(`/tokens/daily?days=${days}`).then(arr),
   conversationTokens: () =>

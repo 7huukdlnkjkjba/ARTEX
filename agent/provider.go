@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -143,15 +144,21 @@ func compactionConfig(windowTokens int) *compaction.Config {
 //	ARTEX_LLM_PROXY    = proxy URL        (optional; http/https/socks5)
 //	ANTHROPIC_API_KEY / OPENAI_API_KEY         = credentials
 func FromEnv() (Config, bool) {
-	prov := os.Getenv("ARTEX_LLM_PROVIDER")
+	prov := strings.TrimSpace(os.Getenv("ARTEX_LLM_PROVIDER"))
 	anthKey := os.Getenv("ANTHROPIC_API_KEY")
 	oaiKey := os.Getenv("OPENAI_API_KEY")
+	baseURL := strings.TrimSpace(os.Getenv("ARTEX_LLM_BASE_URL"))
 
+	// Local model servers have no key to infer the provider from. An explicit
+	// base URL on a local/LAN host is enough: OpenAI-compatible is the common
+	// wire format for Ollama / LM Studio / llama.cpp / vLLM.
 	if prov == "" {
 		switch {
 		case anthKey != "":
 			prov = "anthropic"
 		case oaiKey != "":
+			prov = "openai"
+		case baseURL != "" && IsLocalEndpoint(baseURL):
 			prov = "openai"
 		default:
 			return Config{}, false
@@ -159,13 +166,13 @@ func FromEnv() (Config, bool) {
 	}
 
 	c := Config{
-		BaseURL: os.Getenv("ARTEX_LLM_BASE_URL"),
+		BaseURL: baseURL,
 		Model:   os.Getenv("ARTEX_LLM_MODEL"),
 		Proxy:   strings.TrimSpace(os.Getenv("ARTEX_LLM_PROXY")),
 		// 默认流式;ARTEX_LLM_STREAM=false/0/off 显式关闭走非流式。
 		Stream: !isFalsy(os.Getenv("ARTEX_LLM_STREAM")),
 	}
-	switch prov {
+	switch normalizeProviderAlias(prov) {
 	case "openai":
 		c.Format = llm.FormatOpenAI
 		c.APIKey = oaiKey
@@ -185,7 +192,7 @@ func FromEnv() (Config, bool) {
 			c.Model = "claude-opus-4-8"
 		}
 	}
-	if c.APIKey == "" {
+	if !c.KeyOptional() {
 		return Config{}, false
 	}
 	return c, true
@@ -203,7 +210,12 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		Proxy:   strings.TrimSpace(proxy),
 		Stream:  true, // 默认流式;调用方按 profile 覆盖
 	}
-	switch strings.TrimSpace(provider) {
+	p := normalizeProviderAlias(provider)
+	// No provider + a local base URL is the "just point me at Ollama" case.
+	if p == "" && IsLocalEndpoint(c.BaseURL) {
+		p = "openai"
+	}
+	switch p {
 	case "openai":
 		c.Format = llm.FormatOpenAI
 		// provider appends "/chat/completions"; tolerate a full endpoint URL.
@@ -239,6 +251,82 @@ func isFalsy(s string) bool {
 	return false
 }
 
+// IsLocalEndpoint reports whether a Base URL points at a local/LAN model server
+// (Ollama, LM Studio, llama.cpp, vLLM, a compose service, …). Those endpoints
+// usually have no API key, so the empty-key gates must not treat them as
+// "unconfigured".
+//
+// Accepted without a scheme: "127.0.0.1:11434/v1", "ollama:11434/v1".
+func IsLocalEndpoint(baseURL string) bool {
+	s := strings.TrimSpace(baseURL)
+	if s == "" {
+		return false
+	}
+	if !strings.Contains(s, "://") {
+		s = "http://" + s
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	h := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if h == "" {
+		return false
+	}
+	switch h {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0",
+		"host.docker.internal", "gateway.docker.internal",
+		"host.containers.internal", "host.lima.internal":
+		return true
+	}
+	if strings.HasSuffix(h, ".local") || strings.HasSuffix(h, ".lan") ||
+		strings.HasSuffix(h, ".internal") || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	}
+	// Single-label names are compose/service names ("ollama", "lmstudio") or
+	// LAN hostnames; a public FQDN always has at least one dot.
+	if !strings.Contains(h, ".") {
+		return true
+	}
+	return false
+}
+
+// normalizeProviderAlias maps the names an operator naturally types for a local
+// server onto the OpenAI-compatible wire format ARTEX already speaks.
+func normalizeProviderAlias(p string) string {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "ollama", "local", "lmstudio", "lm-studio", "llamacpp", "llama.cpp", "vllm", "openai-compatible", "openai_compatible":
+		return "openai"
+	}
+	return strings.TrimSpace(p)
+}
+
+// KeyOptional reports whether this config can run without an API key. Local
+// endpoints are allowed; cloud endpoints still require one.
+func (c Config) KeyOptional() bool {
+	return strings.TrimSpace(c.APIKey) != "" || IsLocalEndpoint(c.BaseURL)
+}
+
+// EffectiveKey returns the key sent to the provider. Local endpoints get a
+// harmless placeholder because some OpenAI-compatible servers reject an empty
+// "Authorization: Bearer " header (Ollama itself ignores it).
+func (c Config) EffectiveKey() string {
+	if strings.TrimSpace(c.APIKey) != "" {
+		// Never treat the local placeholder as a cloud credential.
+		if c.APIKey == "local" && !IsLocalEndpoint(c.BaseURL) {
+			return ""
+		}
+		return c.APIKey
+	}
+	if IsLocalEndpoint(c.BaseURL) {
+		return "local"
+	}
+	return ""
+}
+
 // Provider returns the short provider name ("anthropic"/"openai").
 func (c Config) Provider() string {
 	switch c.Format {
@@ -261,7 +349,7 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	lc := llm.Config{
 		Format:     c.Format,
 		BaseURL:    c.BaseURL,
-		APIKey:     c.APIKey,
+		APIKey:     c.EffectiveKey(),
 		Model:      c.Model,
 		HTTPClient: client,
 	}

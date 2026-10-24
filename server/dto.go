@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/traffic"
 )
@@ -620,6 +621,14 @@ type LLMProfileDTO struct {
 }
 
 func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
+	hint := p.APIKeyHint
+	// The stored "local" placeholder is not a credential; say so instead of
+	// showing a meaningless "…ocal" suffix.
+	// ListProfiles deliberately omits the secret, so the placeholder is also
+	// recognizable from its masked hint.
+	if agent.IsLocalEndpoint(p.BaseURL) && (p.APIKey == "local" || p.APIKeyHint == "…ocal") {
+		hint = "本地端点"
+	}
 	return LLMProfileDTO{
 		ID:               i64s(p.ID),
 		Name:             p.Name,
@@ -627,7 +636,7 @@ func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 		BaseURL:          p.BaseURL,
 		Proxy:            p.Proxy,
 		Model:            p.Model,
-		APIKeyHint:       p.APIKeyHint,
+		APIKeyHint:       hint,
 		RatePerSecond:    p.RatePerSecond,
 		RatePerMinute:    p.RatePerMinute,
 		ContextWindowK:   p.ContextWindowK,

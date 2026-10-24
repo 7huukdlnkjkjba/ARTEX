@@ -4,6 +4,40 @@
 
 ## [Unreleased]
 
+### 成本控制
+
+#### 新增的功能
+
+- **一次漏洞挖掘会话默认封顶 ¥6**：按任务（探索）累计 `llm_usage` 台账里的 token，用可配置的价格表折算成人民币；达到「单次会话预算」（默认 ¥6，DeepSeek 官方价：输入 ¥2/M、缓存命中 ¥0.5/M、输出 ¥8/M）后自动停止，不再产生新的模型调用。
+- **两级闸门，保证「停在 6 块附近」而不是「跑飞了才停」**：在跑的 worker/planner 在下一次模型调用时由平台本地合成一个「预算已用尽」的正常结束回合（零成本、不触发重试、不把意图标成 blocked）；引擎同时停止派发/领取新意图，等在跑的执行 drain 完（最多 90 秒）后把任务落成 `paused`，已写回的事实、资产、漏洞全部保留。
+- **预算可调、即时生效**：系统设置新增「单次会话预算 · 漏洞挖掘成本」卡片；`GET/PUT /api/settings` 同时暴露 `task_budget_cny`（0 = 不限），也可用环境变量 `ARTEX_SESSION_BUDGET_CNY` 覆盖；价格表用 `llm_price_{input,output,cache_read,cache_write}_cny_per_mtok` 或对应的 `ARTEX_PRICE_*` 环境变量覆盖。改完下一次模型调用即按新值判断，无需重启或重建 agent。
+- **任务详情直接看钱**：任务详情的会话页在 token 总计旁显示 `≈¥已用 / 上限 ¥6.00`，悬停可看剩余额度与触发后的行为；超过上限时该行标黄。
+- **任务详情可查花费**：`GET /api/exploration/tokens` 新增 `cost` 字段（已用 / 上限 / 剩余 / 是否启用计价），与闸门使用同一份台账和价格表；预算耗尽时任务播报板会留下「已达预算上限」与「已按预算暂停」两条记录。
+- **让模型自己收敛**：planner 每轮、worker 每次运行的系统/用户输入里会带一行预算余额（上限、已用、剩余、百分比），提示接近上限时优先推进最可能出结果的方向并尽早写回，而不是继续扩大枚举。
+
+#### 设计说明
+
+- **为什么按任务而不是按「一次 run」算**：一次挖掘会话会反复唤醒 planner、并行多个 worker，按 run 计费管不住总额；`llm_usage.task_id` 恰好覆盖任务内所有 agent 泳道（planner / worker / mainagent / goals），故障转移、重试、被中断的调用也都计了费，是唯一准确的口径。
+- **为什么不硬中断**：直接 cancel 会让正在跑的 worker 丢掉尚未写回的结果；本地合成一个正常 `end_turn` 能让 SDK 走正常收尾路径，成本为零，也不会污染故障转移链。
+- **为什么落 `paused` 而不是 `done`/`timeout`**：预算耗尽不等于目标达成，也不该谎报超时；`paused` 是既有的可恢复状态，调高预算后点「继续」就能从待领队列接着跑。
+- **缓存命中不重复计费**：norma 的 `InputTokens` 是含缓存命中的总输入，成本按 `(输入 − 缓存命中) × 输入价 + 缓存命中 × 命中价 + 输出 × 输出价` 计算，避免把缓存前缀算两遍。
+- **价格表默认值只对 DeepSeek 准确**：默认值按 deepseek-chat 公开价配置；用 Claude/GPT/中转站时请先按实际单价覆盖价格表，否则 ¥6 的购买力会被高估或低估（例如 Claude 输出价高，会在更少的 token 上触发上限）。
+
+### 本地 AI 适配
+
+#### 新增的功能
+
+- **本地 OpenAI 兼容端点免 Key**：`agent.IsLocalEndpoint` 识别 `localhost`、`127.0.0.1`、`::1`、RFC1918 私网、
+  `*.local/*.lan/*.internal`、`host.docker.internal` 与不带点的 compose 服务名。这些端点可以不填 API Key：
+  后端自动使用占位 Key `local`，避免空 `Authorization` 头被部分网关拒绝；云端点仍然强制要求真实 Key。
+- **Provider 别名**：`ARTEX_LLM_PROVIDER=ollama|local|lmstudio|llamacpp|vllm|openai-compatible`
+  统一映射到 OpenAI Chat Completions 格式；只填 `ARTEX_LLM_BASE_URL` + `ARTEX_LLM_MODEL` 也能从环境变量启动。
+- **UI 本地预设**：LLM 配置页新增 `Ollama` / `LM Studio` / `llama.cpp` / `vLLM` 一键填充 Base URL，
+  格式选项改名为「OpenAI 兼容（含 Ollama / LM Studio / llama.cpp）」；本地端点未填 Key 不再显示「未配置 Key」。
+- **模型发现与连通性测试走本地端点**：`/api/llm/models` 与 `/api/llm/test` 在本地端点允许空 Key，
+  且不会把已保存的云端 Key 误发给 `127.0.0.1`。
+- **防止占位 Key 外泄到云端**：把本地配置切回云端时必须显式填写 Key；`local` 占位符不会被当作真实凭据发送。
+
 ## [0.3.16] - 2026-10-11
 
 ### 日志

@@ -397,6 +397,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
+	// 会话预算(¥)：让 worker 知道这条意图跑完还剩多少额度，接近上限时主动收束、
+	// 立刻写回，而不是继续扩大枚举。预算关闭时为空，提示词不变。
+	if note := sessionBudgetNote(ctx); note != "" {
+		sysBody += "\n\n" + note
+	}
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
 	sysBody += renderIntentTask(intent)
 	if as != nil {

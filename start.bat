@@ -1,54 +1,72 @@
 @echo off
-rem 控制台切 UTF-8，否则本文件里的中文在 GBK 终端下是乱码。
+rem ARTEX one-click start (Windows): PostgreSQL first, then the ARTEX backend.
+rem Usage: double-click this file, or run  start.bat  in a terminal.
+rem Equivalent to: pwsh -File .\pentest-ai\scripts\start.ps1
 chcp 65001 >nul 2>&1
-rem ARTEX 守护启动脚本（Windows）
-rem
-rem 用法：
-rem   start.bat                  前台运行（Ctrl-C 停止）
-rem   start.bat -addr :9000      额外参数原样透传给 artex
-rem
-rem 它只做一件事：把 artex.exe 跑起来，进程退出后按退出码决定要不要再拉起。
-rem
-rem   0      用户正常停止     -> 退出循环
-rem   75     程序请求重启     -> 立刻重跑（页面点了"一键更新"或"回滚"）
-rem   其他   崩溃             -> 退避后重跑（1->2->4…最多 60 秒）
-rem
-rem 下载、SHA256 校验、换装都不在这里，全部由 artex 自己在启动时完成
-rem （selfupdate 包）。脚本保持傻瓜化，详见 start.sh 顶部的说明。
-
-setlocal enabledelayedexpansion
+setlocal
 cd /d "%~dp0"
 
-set "BIN=artex.exe"
-if not exist "%BIN%" (
-	echo [artex] 找不到可执行文件 %BIN% 1>&2
-	exit /b 1
+set "PA=%~dp0pentest-ai"
+set "PGBIN=%PA%\runtime\pgsql\bin"
+set "PGDATA=%PA%\runtime\pgdata"
+set "LOGS=%PA%\runtime\logs"
+set "STARTPS1=%PA%\scripts\start.ps1"
+
+if not exist "%STARTPS1%" (
+  echo [错误] 找不到启动脚本: %STARTPS1%
+  goto :fail
+)
+if not exist "%PGBIN%\pg_ctl.exe" (
+  echo [错误] 找不到 PostgreSQL: %PGBIN%\pg_ctl.exe
+  goto :fail
+)
+if not exist "%PGDATA%\PG_VERSION" (
+  echo [错误] 数据库尚未初始化: %PGDATA%
+  echo        请先运行 pentest-ai\scripts\init.ps1
+  goto :fail
+)
+if not exist "%LOGS%" mkdir "%LOGS%" >nul 2>&1
+
+rem ---------- 1. PostgreSQL (127.0.0.1:5433) ----------
+rem 输出必须重定向到 nul/文件，不能接管道: postgres 会继承管道句柄，导致等待不返回。
+"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" status >nul 2>&1
+if errorlevel 1 (
+  echo [pg] 正在启动 ...
+  "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%LOGS%\pg.log" -w -t 60 start >nul 2>&1
+  if errorlevel 1 (
+    echo [错误] PostgreSQL 启动失败, 详见 "%LOGS%\pg.log"
+    goto :fail
+  )
+  echo [pg] 已启动 127.0.0.1:5433
+) else (
+  echo [pg] 已在运行 127.0.0.1:5433
 )
 
-set "RESTART_CODE=75"
-set "MAX_DELAY=60"
-set /a delay=1
-
-:loop
-"%BIN%" %*
-set "code=!ERRORLEVEL!"
-
-if "!code!"=="0" (
-	echo [artex] 正常退出
-	exit /b 0
+rem ---------- 2. ARTEX backend (127.0.0.1:8787 / proxy 8788) ----------
+where pwsh >nul 2>&1
+if errorlevel 1 (
+  echo [错误] 找不到 pwsh 7, 无法启动 ARTEX
+  goto :fail
+)
+pwsh -NoProfile -ExecutionPolicy Bypass -File "%STARTPS1%"
+if errorlevel 1 (
+  echo [错误] ARTEX 启动失败, 详见 "%LOGS%\artex.err.log"
+  goto :fail
 )
 
-if "!code!"=="%RESTART_CODE%" (
-	rem 更新/回滚已就绪：重跑后 artex 会在启动时完成换装。
-	echo [artex] 请求重启（应用新版本）…
-	set /a delay=1
-	goto loop
-)
+rem ---------- 3. 打开控制台（仅 Firefox，后端就绪后再开，避免首个请求打空） ----------
+start "" firefox.exe "http://127.0.0.1:8787/login"
 
-echo [artex] 异常退出 ^(code=!code!^)，!delay!s 后重启 1>&2
-rem timeout 在被重定向的控制台里会失败，用 ping 兜底（延时 N 秒需要 N+1 次）。
-set /a pings=!delay!+1
-ping -n !pings! 127.0.0.1 >nul 2>&1
-set /a delay=!delay!*2
-if !delay! gtr %MAX_DELAY% set /a delay=%MAX_DELAY%
-goto loop
+echo.
+echo   控制台 : http://127.0.0.1:8787   (用户名 ARTEX)
+echo   录制代理: 127.0.0.1:8788
+echo   停止    : pwsh -File .\pentest-ai\scripts\stop.ps1
+echo   驾驶舱  : pwsh -File .\pentest-ai\scripts\status.ps1
+echo   日志    : %LOGS%\artex.err.log
+exit /b 0
+
+:fail
+echo.
+echo 启动未完成。
+pause
+exit /b 1

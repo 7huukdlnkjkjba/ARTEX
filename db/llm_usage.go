@@ -78,6 +78,32 @@ VALUES (NULLIF($1,''),$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$
 	return err
 }
 
+// TaskTokenTotals is a task's whole-ledger token totals — every agent lane
+// (planner / worker / mainagent / goals) and every call, success or error.
+// Cost control reads this before each model call; keeping it a single aggregate
+// row avoids paging the per-call ledger on a hot path.
+type TaskTokenTotals struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	CacheRead    int `json:"cache_read"`
+	CacheWrite   int `json:"cache_write"`
+}
+
+// TaskTokenTotals sums llm_usage for one task. An unknown/empty task id yields
+// zero totals (not an error): non-task callers simply have no budget.
+func (d *DB) TaskTokenTotals(taskID string) (TaskTokenTotals, error) {
+	var t TaskTokenTotals
+	if taskID == "" {
+		return t, nil
+	}
+	err := d.QueryRow(`
+SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+       COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0)
+FROM llm_usage
+WHERE task_id = $1`, taskID).Scan(&t.InputTokens, &t.OutputTokens, &t.CacheRead, &t.CacheWrite)
+	return t, err
+}
+
 // TokenByModel aggregates a task's LLM token usage grouped by model, most-used
 // first, from the always-on llm_usage ledger. taskID is the task registry id.
 // Accurate even with per-agent model bindings, pool rotation/failover, and

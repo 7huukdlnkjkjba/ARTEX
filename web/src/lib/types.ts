@@ -788,6 +788,16 @@ export interface SessionTokenUsage {
   cache_write_tokens: number;
 }
 
+// 会话费用视角(GET /api/exploration/tokens → cost)。后端用与预算闸门同一份
+// llm_usage 台账和价格表折算，所以这里显示的已用金额就是触发上限的那个金额。
+export interface SessionCost {
+  spent_cny: number;
+  budget_cny: number;
+  remaining_cny: number;
+  enabled: boolean;
+  currency: string;
+}
+
 export interface BatchControlItem {
   id: string;
   ok: boolean;
@@ -933,6 +943,9 @@ export interface Settings {
   global_proxy?: string;
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
+  // 单次漏洞挖掘会话(一个任务)的模型费用上限，单位元；0=不限。默认 6。
+  // 改动即时生效：预算闸门在每次模型调用 / 每轮规划前重新解析。
+  task_budget_cny?: number;
   // 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
   task_concurrency_enabled?: boolean; // 默认 false
   task_concurrency_limit?: number; // 开启后默认 5

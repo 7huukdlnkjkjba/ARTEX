@@ -1,0 +1,9 @@
+日常会用到的脚本
+用途	命令
+启动	pwsh -File .\pentest-ai\scripts\start.ps1
+停止	pwsh -File .\pentest-ai\scripts\stop.ps1
+驾驶舱（目标/范围/意图/发现/覆盖度）	pwsh -File .\pentest-ai\scripts\status.ps1
+调成无人值守形态	pwsh -File .\pentest-ai\scripts\configure.ps1
+投放任务并盯进度	pwsh -File .\pentest-ai\scripts\run-task.ps1 -Goal "..." -Watch
+控制台：http://127.0.0.1:8787 ，用户名固定 ARTEX，密码在 admin_password.txt
+录制代理：127.0.0.1:8788；日志：artex.err.log

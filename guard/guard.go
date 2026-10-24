@@ -75,6 +75,11 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		cmd = in.Text
 	}
 	g.record(ev.ToolName, "allow", "", cmd)
+	// 授权范围强制层先于用户规则与裁判执行：范围是平台硬边界，不受
+	// intercept_enabled_tools 或规则启用状态影响。见 scope_enforce.go。
+	if res := g.applyScope(ctx, ev); res.Decision == "block" {
+		return res
+	}
 	return g.applyIntercept(ctx, ev)
 }
 

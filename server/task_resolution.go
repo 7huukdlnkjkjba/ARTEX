@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -29,8 +30,8 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 		Model:     p.Model,
 		Source:    source,
 	}
-	if p.APIKey == "" {
-		result.Reason = "LLM 配置未设置 API Key"
+	if p.APIKey == "" && !agent.IsLocalEndpoint(p.BaseURL) {
+		result.Reason = "LLM 配置未设置 API Key（本地/LAN 端点可留空）"
 		return result
 	}
 	if _, _, ok := s.providerForProfile(p.ID); !ok {

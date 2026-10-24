@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,7 +138,9 @@ type Engine struct {
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
 
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
-	settling     sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
+	settling sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
+	// 会话预算(¥)闸门: taskID -> bool, 预算收尾已启动(每任务只跑一次)。
+	budgetHold   sync.Map
 	deadline     sync.Map // taskID -> int64 unix, 绝对截止时刻(首次运行时盖章;0/缺省=不限)
 	stamped      sync.Map // taskID -> bool, first_run_at 是否已盖章(本进程内只盖一次)
 	inflight     sync.Map // taskID -> *int64, 在跑的 planner.Plan + worker.Execute 计数(用于 drain)
@@ -316,6 +319,10 @@ func (e *Engine) Resume(t *Task) {
 		return
 	}
 	e.paused.Delete(t.ID)
+	// 预算暂停后用户点「继续」：清掉进程内的预算闸门与 settling，让循环重新领取
+	// 意图。若花费仍在上限之上，首个规划轮会立刻再次触发闸门并重新暂停——要真正
+	// 接着跑，必须先把「单次会话预算」调高。
+	e.clearBudgetHold(t.ID)
 	t.Notify()
 }
 
@@ -777,11 +784,25 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 }
 
 // plannerHeartbeatInterval 解析任务的 planner 心跳间隔。db.CreateTask 已归一
-// (低于 600 一律抬到 600);这里再兜一次底,防内存态异常值。
+// (低于 db.MinPlanHeartbeatSeconds 一律抬到该值);这里再兜一次底,防内存态异常值。
+//
+// 本仓库改动：上游快照把心跳下限硬编码为 600s（db.MinPlanHeartbeatSeconds），
+// 且不提供全局设置项——对无人值守的长跑任务，这意味着 worker 卡住后最长 10 分钟
+// 才会被巡检到。这里允许用环境变量 ARTEX_PLANNER_HEARTBEAT_FLOOR 覆盖"下限"
+// （注意是下限，不是周期：每任务仍可用 plan_heartbeat_seconds 指定更大值）。
+// 例：ARTEX_PLANNER_HEARTBEAT_FLOOR=300  → 巡检间隔最短 5 分钟。
 func plannerHeartbeatInterval(t *Task) time.Duration {
+	floor := db.MinPlanHeartbeatSeconds
+	if v := strings.TrimSpace(os.Getenv("ARTEX_PLANNER_HEARTBEAT_FLOOR")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 10 && n < 86400 {
+			floor = n
+		} else {
+			log.Printf("[planner] 忽略非法 ARTEX_PLANNER_HEARTBEAT_FLOOR=%q（需为 10..86399 的整数）", v)
+		}
+	}
 	sec := t.PlanHeartbeatSeconds
-	if sec < db.MinPlanHeartbeatSeconds { // 下限=默认=600(10min)
-		sec = db.MinPlanHeartbeatSeconds
+	if sec < floor {
+		sec = floor
 	}
 	return time.Duration(sec) * time.Second
 }
@@ -856,6 +877,13 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			}
 			return // goalless 分支永不进入 planner.Plan
 		}
+		// 会话预算(¥)：到顶就不再规划——规划轮本身也要花 token，继续唤醒只会
+		// 击穿上限。触发优雅收尾后由 settleBudget 把任务落成 paused。
+		cfg, spent, over := e.budgetState(t.ID)
+		if over {
+			e.BudgetReached(t.ID)
+			return
+		}
 		if !e.beginTaskOperation(t.ID) {
 			return
 		}
@@ -864,6 +892,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		e.touch(t.ID)
 		emit := func(r db.Activity) { e.emitActivity(t, r) }
 		ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
+		if cfg.Enabled() {
+			// 预算余额随本轮 user 输入注入，让 planner 在接近上限时主动收敛方向。
+			ectx = agent.WithSessionBudget(ectx, agent.SessionBudget{SpentCNY: spent, LimitCNY: cfg.BudgetCNY})
+		}
 		if ectx.Err() != nil || e.IsDeleting(t.ID) {
 			return
 		}
@@ -948,6 +980,15 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			}
 			continue // 任务已终态(done/failed/timeout):停止领取遗留意图,别在完成后空跑 frontier
 		}
+		// 会话预算(¥)：到顶后不再领取新意图；在跑的 run 由下一次模型调用的本地
+		// "预算用尽"回合结束，settleBudget 等在跑执行 drain 完再暂停任务。
+		if _, _, over := e.budgetState(t.ID); over {
+			e.BudgetReached(t.ID)
+			if sleepCtx(ctx, 1000*time.Millisecond) {
+				return
+			}
+			continue
+		}
 		if !e.beginTaskOperation(t.ID) {
 			return
 		}
@@ -985,6 +1026,10 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	e.touch(t.ID)
 	emit := func(r db.Activity) { e.emitActivity(t, r) }
 	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
+	if cfg, spent, _ := e.budgetState(t.ID); cfg.Enabled() {
+		// 预算余额随系统提示注入 worker：接近上限时它会主动收束、立刻写回。
+		ectx = agent.WithSessionBudget(ectx, agent.SessionBudget{SpentCNY: spent, LimitCNY: cfg.BudgetCNY})
+	}
 	if ectx.Err() != nil || e.IsDeleting(t.ID) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 领取后回退失败: %v", name, t.ID, intent.ID, err)

@@ -1808,6 +1808,20 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
+	local := agent.IsLocalEndpoint(p.BaseURL)
+	// Switching a saved local profile back to a cloud endpoint must not send the
+	// "local" placeholder as a real key. Require an explicit key in that case.
+	if p.APIKey == "" && !local && p.ID > 0 {
+		if old, err := pg.ProfileByID(p.ID); err == nil && old != nil && agent.IsLocalEndpoint(old.BaseURL) {
+			writeErr(w, 400, "从本地端点切到云端端点时必须填写 API Key")
+			return
+		}
+	}
+	// Local endpoints have no real key. Store the same placeholder the provider
+	// sends so an old cloud key cannot survive a switch to 127.0.0.1.
+	if p.APIKey == "" && local {
+		p.APIKey = "local"
+	}
 	p.Streaming = body.Streaming == nil || *body.Streaming
 	// 输出上限:负数无意义,归零(= 不发送该字段)。字段名开关只有 Chat Completions
 	// 用得上——anthropic 与 openai-responses 各自定死了字段名,存下来只会误导后续读者,
@@ -1995,13 +2009,20 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 			apiKey = p.APIKey
 		}
 	}
-	if apiKey == "" {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key"})
-		return
-	}
 
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
 	provider := strings.TrimSpace(req.Provider)
+	local := agent.IsLocalEndpoint(baseURL)
+	if !local && apiKey == "local" {
+		apiKey = ""
+	}
+	if apiKey == "" && !local {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key（本地/LAN 端点可留空）"})
+		return
+	}
+	if provider == "" && local {
+		provider = "openai"
+	}
 
 	// Candidate endpoints to try in order. Some Anthropic-compatible providers
 	// (e.g. DeepSeek) implement /v1/messages under an /anthropic path but expose
@@ -2013,12 +2034,16 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	bearerHdr := func() http.Header {
 		h := http.Header{}
-		h.Set("Authorization", "Bearer "+apiKey)
+		if apiKey != "" {
+			h.Set("Authorization", "Bearer "+apiKey)
+		}
 		return h
 	}
 	anthropicHdr := func() http.Header {
 		h := http.Header{}
-		h.Set("x-api-key", apiKey)
+		if apiKey != "" {
+			h.Set("x-api-key", apiKey)
+		}
 		h.Set("anthropic-version", "2023-06-01")
 		return h
 	}

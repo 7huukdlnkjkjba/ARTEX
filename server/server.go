@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/cost"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmpool"
@@ -334,7 +335,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
-	if cfg.APIKey == "" {
+	if !cfg.KeyOptional() {
 		return cfg, false
 	}
 	s.cfgMu.Lock()
@@ -345,6 +346,12 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 
 // saveLLMConfig persists the LLM config as the active "default" profile in PG.
 func (s *Server) saveLLMConfig(cfg agent.Config) error {
+	// A local endpoint with no key stores the same harmless placeholder the
+	// provider sends. This also replaces a previously stored cloud key instead
+	// of silently keeping it and shipping it to 127.0.0.1 on the next request.
+	if cfg.APIKey == "" && agent.IsLocalEndpoint(cfg.BaseURL) {
+		cfg.APIKey = "local"
+	}
 	// cfg.Provider() already returns one of the three valid format strings
 	// (anthropic / openai / openai-responses), matching the DB CHECK constraint.
 	format := cfg.Provider()
@@ -505,7 +512,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
-	if cfg.APIKey == "" {
+	if !cfg.KeyOptional() {
 		return cfg, false
 	}
 	return cfg, true
@@ -1332,14 +1339,27 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.ContextWindowK = k
 	}
-	if cfg.APIKey == "" {
+	local := agent.IsLocalEndpoint(cfg.BaseURL)
+	if cfg.APIKey == "" && !local {
 		s.cfgMu.Lock()
-		cfg.APIKey = s.llmCfg.APIKey // keep existing key if not re-entered
+		existing := s.llmCfg.APIKey
 		s.cfgMu.Unlock()
+		// "local" is a placeholder, never a cloud credential.
+		if existing != "" && existing != "local" {
+			cfg.APIKey = existing // keep existing cloud key if not re-entered
+		}
 	}
-	if cfg.APIKey == "" {
-		writeErr(w, 400, "api_key required")
+	if cfg.APIKey == "local" && !local {
+		cfg.APIKey = ""
+	}
+	if !cfg.KeyOptional() {
+		writeErr(w, 400, "api_key required（本地/LAN 端点可留空）")
 		return
+	}
+	// Keep the in-memory config consistent with what the DB will store and what
+	// the provider sends, so /api/llm reports key_set=true for a local endpoint.
+	if cfg.APIKey == "" {
+		cfg.APIKey = "local"
 	}
 	// Validate provider construction before persisting it as the active profile.
 	if _, err := cfg.NewProvider(); err != nil {
@@ -1398,6 +1418,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
 	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。
 	// 会话头名同理：表单未带时用已存 profile 的值兜底。
+	local := agent.IsLocalEndpoint(cfg.BaseURL)
 	if req.ProfileID != nil && (cfg.APIKey == "" || cfg.SessionHeaderKey == "") {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
 			if cfg.APIKey == "" {
@@ -1408,13 +1429,20 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if cfg.APIKey == "" {
+	// A local endpoint must not silently inherit a cloud key from the global
+	// config: the operator pointed this test at 127.0.0.1 on purpose.
+	if cfg.APIKey == "" && !local {
 		s.cfgMu.Lock()
 		cfg.APIKey = s.llmCfg.APIKey
 		s.cfgMu.Unlock()
 	}
-	if cfg.APIKey == "" {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key"})
+	// "local" is only a placeholder for local endpoints; never send it to a
+	// cloud endpoint as if it were a credential.
+	if !local && cfg.APIKey == "local" {
+		cfg.APIKey = ""
+	}
+	if !cfg.KeyOptional() {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key（本地/LAN 端点可留空）"})
 		return
 	}
 	// 重试参数【不】带进连接测试:测试有 30s 硬超时,把配置的重试次数/长间隔叠上去
@@ -2816,6 +2844,7 @@ func (s *Server) tokenStats(w http.ResponseWriter, r *http.Request) {
 			"workers":  []db.TokenUsage{},
 			"sessions": []db.SessionTokenUsage{},
 			"total":    tokenTotalDTO(db.TokenUsage{}),
+			"cost":     map[string]any{},
 		})
 		return
 	}
@@ -2834,7 +2863,17 @@ func (s *Server) tokenStats(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"workers": stats, "sessions": sessions, "total": tokenTotalDTO(total)})
+	// 会话预算视角：按 llm_usage 台账(所有 agent 泳道)折算成人民币，和闸门用的是
+	// 同一套口径与同一份价格表，所以页面上的已用金额就是熔断判断的金额。
+	cfg, spent := s.taskSpend(t.ID)
+	costView := map[string]any{
+		"spent_cny":     roundCNY(spent),
+		"budget_cny":    roundCNY(cfg.BudgetCNY),
+		"remaining_cny": roundCNY(cfg.RemainingCNY(spent)),
+		"enabled":       cfg.Enabled(),
+		"currency":      "CNY",
+	}
+	writeJSON(w, 200, map[string]any{"workers": stats, "sessions": sessions, "total": tokenTotalDTO(total), "cost": costView})
 }
 
 // tokenDailyStats returns global token consumption aggregated by calendar day
@@ -3333,6 +3372,9 @@ func (s *Server) settingsPayload() map[string]any {
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
 		"notify_public_base_url":     notifyPublicBaseURL(s.m.pg),
 		"notify_digest_interval_min": notifyDigestIntervalMin(s.m.pg),
+		// 单次会话(任务)的模型费用上限(¥)。0=不限；默认 ¥6。改动即时生效：
+		// 预算闸门每次模型调用/每轮规划都重新解析，无需重启或重建 agent。
+		"task_budget_cny": s.costConfig().BudgetCNY,
 	}
 }
 
@@ -3408,6 +3450,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		NotifyEnabled    *bool   `json:"notify_enabled"`
 		NotifyBaseURL    *string `json:"notify_public_base_url"`
 		NotifyDigestMins *int    `json:"notify_digest_interval_min"`
+		// 单次会话模型费用上限(¥)：0=不限。即时生效(每次模型调用重新解析)。
+		TaskBudgetCNY *float64 `json:"task_budget_cny"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3459,6 +3503,17 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.m.pg.SetSetting(settingNotifyDigestMinutes, strconv.Itoa(*req.NotifyDigestMins)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.TaskBudgetCNY != nil {
+		v := *req.TaskBudgetCNY
+		if v < 0 || v > 100000 {
+			writeErr(w, 400, "单次会话预算需在 0 到 100000 元之间（0 = 不限）")
+			return
+		}
+		if err := s.m.pg.SetSetting(cost.SettingBudgetCNY, strconv.FormatFloat(v, 'f', 2, 64)); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

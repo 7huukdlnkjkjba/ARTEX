@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import {
+  CoinsIcon,
   CpuIcon,
   FlaskConicalIcon,
   KeyboardIcon,
@@ -46,6 +47,9 @@ export default function SystemSettingsPage() {
   const [pyInterp, setPyInterp] = React.useState("");
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
+  // 单次会话(任务)的模型费用上限，元；0=不限。默认 6。
+  const [budget, setBudget] = React.useState("6");
+  const [savingBudget, setSavingBudget] = React.useState(false);
   // 操作约束注入范围(默认都开)。
   const [injectPlanner, setInjectPlanner] = React.useState(true);
   const [injectWorker, setInjectWorker] = React.useState(true);
@@ -67,6 +71,7 @@ export default function SystemSettingsPage() {
     setGlobalProxyInput(s.global_proxy ?? "");
     setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
+    setBudget(String(s.task_budget_cny ?? 6));
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
@@ -88,6 +93,23 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingWorkers(false));
+  };
+
+  const saveBudget = () => {
+    const n = Number(budget);
+    if (!Number.isFinite(n) || n < 0) {
+      toast.error("预算必须是不小于 0 的数字（0 = 不限）");
+      return;
+    }
+    setSavingBudget(true);
+    api
+      .setSettings({ task_budget_cny: n })
+      .then((s) => {
+        apply(s);
+        toast.success(n > 0 ? `已设置单次会话预算 ¥${n.toFixed(2)}` : "已关闭单次会话预算上限");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message))
+      .finally(() => setSavingBudget(false));
   };
 
   const savePython = () => {
@@ -726,6 +748,37 @@ export default function SystemSettingsPage() {
                 保存
               </Button>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <CoinsIcon className="size-4" />
+              单次会话预算 · 漏洞挖掘成本
+            </CardTitle>
+            <CardDescription>
+              一次漏洞挖掘会话（一个任务）的模型费用上限，默认 <b>¥6</b>。按 token 折算：默认 DeepSeek
+              官方价（输入 ¥2/百万、缓存命中 ¥0.5/百万、输出 ¥8/百万）。用 Claude / GPT /
+              中转站时请先用环境变量 <code>ARTEX_PRICE_*</code> 覆盖价格表，否则金额会失真。达到上限后不再发出新的模型调用，
+              在跑的工作先把结果写回，随后任务自动<b>暂停</b>；调高预算后点「继续」可接着跑。填 0 = 不限。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center gap-2">
+            <Input
+              type="number"
+              min={0}
+              step="0.5"
+              className="w-32 font-mono text-sm"
+              placeholder="6"
+              value={budget}
+              disabled={!loaded || savingBudget}
+              onChange={(e) => setBudget(e.target.value)}
+            />
+            <span className="text-xs text-muted-foreground">元 / 任务</span>
+            <Button onClick={saveBudget} disabled={!loaded || savingBudget}>
+              保存
+            </Button>
           </CardContent>
         </Card>
 

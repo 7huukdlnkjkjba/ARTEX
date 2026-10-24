@@ -220,6 +220,13 @@ func (r *taskLLMRuntime) streamHooks() taskLLMStreamHooks {
 }
 
 func (r *taskLLMRuntime) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	// 会话预算闸门：余额用尽后不再发出真实请求，而是本地合成一个"预算已用尽"的
+	// 正常结束回合（零成本），让在跑的 worker/planner 干净收尾，而不是以模型错误
+	// 收场（那会触发重试并把意图标成 blocked）。
+	if stop, text := r.s.budgetStop(r.taskID); stop {
+		log.Printf("[budget] task %s 会话预算已用尽，本地结束本次模型调用", r.taskID)
+		return budgetStopStream(text)
+	}
 	ctx = llmrec.WithTaskID(ctx, r.taskID)
 	return streamTaskLLM(ctx, r.taskID, req, r.streamHooks())
 }
@@ -230,6 +237,10 @@ func (r *taskLLMRuntime) Stream(ctx context.Context, req llm.CompletionRequest) 
 // duplicated model output or tool execution (the "committed" bookkeeping the
 // streaming path needs is unnecessary here).
 func (r *taskLLMRuntime) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	if stop, text := r.s.budgetStop(r.taskID); stop {
+		log.Printf("[budget] task %s 会话预算已用尽，本地结束本次模型调用", r.taskID)
+		return budgetStopMessage(text)
+	}
 	ctx = llmrec.WithTaskID(ctx, r.taskID)
 	return completeTaskLLM(ctx, r.taskID, req, r.streamHooks())
 }
@@ -586,6 +597,9 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	// (agentsForTask),Compactor 必须接在这里。走任务路由的 planner provider(§4:与 agent
 	// 同模型,随任务 LLM 链解析),压缩用 Complete 一次性生成 body。
 	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
+	// 管控钩子：上游快照里 planner 完全没有 Hooks，而它的工具集含 Bash——等于规划阶段
+	// 可绕过一切拦截与授权范围。补上（拦截规则 + 范围强制）。
+	pl.SetGuard(t.Guard)
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	main.SetFindingRecorder(s.evidenceStore())
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
@@ -595,6 +609,8 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
+	// 管控钩子：mainagent 是人类接口但工具集含 Bash，同样要过拦截与范围强制。
+	main.SetGuard(t.Guard)
 	bundle := &taskAgentBundle{
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
 		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,
