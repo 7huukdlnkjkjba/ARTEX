@@ -995,6 +995,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/guard/auto-allow", s.guardAutoAllowGet)
 	mux.HandleFunc("PUT /api/guard/auto-allow", s.guardAutoAllowSet)
 
+	// RoE 授权范围强制三态(off / warn / strict)
+	mux.HandleFunc("GET /api/guard/roe", s.guardRoEGet)
+	mux.HandleFunc("PUT /api/guard/roe", s.guardRoESet)
+
 	// 受管文件投递(F13):管理 API 在 JWT 之后;下载路径 /s/ 在 root mux(JWT 之外,
 	// 目标机器没有 token——安全靠 24 字节随机 token + 每 token 限速 + 一致性 404)。
 	mux.HandleFunc("POST /api/stage", s.stageCreate)

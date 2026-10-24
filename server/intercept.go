@@ -115,6 +115,52 @@ func (s *Server) guardAutoAllowSet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.m.interceptor.AutoAllowStatus())
 }
 
+// --- RoE 授权范围强制（off / warn / strict）---
+
+// guardRoEGet returns the current RoE enforcement mode (default "warn").
+func (s *Server) guardRoEGet(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	mode, _, err := pg.GetSetting(settingRoEEnforcement)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if mode == "" {
+		mode = "warn"
+	}
+	writeJSON(w, 200, map[string]any{"mode": mode})
+}
+
+// guardRoESet switches the RoE enforcement mode. "off" 关闭范围强制（仅审计其它层），
+// "warn" 越界只记审计，strict 越界转人工审批（与命令拦截共用审批流）。
+func (s *Server) guardRoESet(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	switch req.Mode {
+	case "off", "warn", "strict":
+	default:
+		writeErr(w, 400, "mode 只能是 off / warn / strict")
+		return
+	}
+	if err := pg.SetSetting(settingRoEEnforcement, req.Mode); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"mode": req.Mode})
+}
+
 // wireInterceptReviewer installs the LLM fallback judge into the interceptor. The
 // judge runs only on tool calls that matched no rule (see intercept.Judge). It
 // resolves the configured judge profile (0 → active/default), builds a provider,

@@ -1754,3 +1754,15 @@ export interface PendingScopeRow {
   last_seen: string;
   decided_at?: string;
 }
+
+// AutoAllowState: 一键放行(guard auto-allow)的当前状态。enabled=false 时
+// remaining_seconds 无意义。
+export interface AutoAllowState {
+  enabled: boolean;
+  expires_at: number; // unix 秒
+  remaining_seconds: number;
+}
+
+// RoeMode: 授权范围强制三态。off=只审计不拦; warn=越界记审计并放行;
+// strict=越界走 ask 人工审批。
+export type RoeMode = "off" | "warn" | "strict";

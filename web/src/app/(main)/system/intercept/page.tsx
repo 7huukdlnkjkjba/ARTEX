@@ -9,6 +9,7 @@ import {
   PlusIcon,
   ShieldAlertIcon,
   Trash2Icon,
+  ZapIcon,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -48,16 +49,28 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import type {
   InterceptAction,
+  AutoAllowState,
   InterceptRule,
   JudgeConfig,
   JudgeDayUsage,
   JudgeUsage,
   LLMProfile,
+  RoeMode,
   Tool,
 } from "@/lib/types";
 
@@ -437,6 +450,218 @@ function JudgeCard() {
   );
 }
 
+// ---- 操作审查：一键放行 / RoE 三态 ----
+
+const AUTO_ALLOW_HOURS = [2, 4, 8] as const;
+
+function autoAllowRemainingLabel(secs: number): string {
+  const h = Math.floor(secs / 3600);
+  const m = Math.ceil((secs % 3600) / 60);
+  if (h <= 0) return `${Math.max(1, m)} 分钟`;
+  return m > 0 && m < 60 ? `${h} 小时 ${m} 分` : `${h + (m >= 60 ? 1 : 0)} 小时`;
+}
+
+/** 一键放行：限时自动批准 ask，deny 不豁免，到期自动恢复。 */
+function AutoAllowCard() {
+  const [st, setSt] = React.useState<AutoAllowState | null>(null);
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [hours, setHours] = React.useState<number>(2);
+  const [busy, setBusy] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    try {
+      setSt(await api.getAutoAllow());
+    } catch {
+      // 状态条非关键，失败静默（30s 轮询会重试）
+    }
+  }, []);
+
+  React.useEffect(() => {
+    load();
+    const t = setInterval(load, 30_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  async function enable() {
+    setBusy(true);
+    try {
+      setSt(await api.setAutoAllow(true, hours));
+      setConfirmOpen(false);
+      toast.success(`一键放行已开启（${hours} 小时后自动恢复拦截）`);
+    } catch (e) {
+      toast.error("开启失败：" + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disable() {
+    setBusy(true);
+    try {
+      setSt(await api.setAutoAllow(false, 0));
+      toast.success("一键放行已关闭，恢复人工审批");
+    } catch (e) {
+      toast.error("关闭失败：" + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const enabled = st?.enabled ?? false;
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-3 p-4">
+        <div className="flex items-center gap-2">
+          <ZapIcon className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-medium">一键放行</h3>
+          <span className="text-xs text-muted-foreground">限时自动批准，deny 不豁免</span>
+        </div>
+        <div
+          className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-2.5 ${
+            enabled ? "border-red-400/60 bg-red-50/50 dark:bg-red-950/20" : "bg-muted/40"
+          }`}
+        >
+          <div className="flex min-w-0 items-center gap-2 text-sm">
+            <span className="truncate text-muted-foreground">
+              开启后 agent 的 ask 类操作（横向/隧道/爆破/临时服务）无人值守放行
+            </span>
+          </div>
+          <Switch
+            checked={enabled}
+            disabled={busy || st === null}
+            onCheckedChange={(v) => (v ? setConfirmOpen(true) : disable())}
+          />
+        </div>
+
+        {enabled && st && (
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-red-500/60 bg-red-100/60 px-4 py-2.5 dark:bg-red-950/40">
+            <p className="text-sm font-medium text-red-700 dark:text-red-400">
+              自动放行中 · 剩余 {autoAllowRemainingLabel(st.remaining_seconds)}（到期自动恢复拦截）
+            </p>
+            <Button variant="destructive" size="sm" className="shrink-0" onClick={disable} disabled={busy}>
+              关闭
+            </Button>
+          </div>
+        )}
+
+        <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>开启一键放行？</AlertDialogTitle>
+              <AlertDialogDescription asChild>
+                <div className="space-y-3">
+                  <p>
+                    开启后，所有需审批操作将
+                    <span className="font-semibold text-red-600 dark:text-red-400">无人值守自动放行</span>
+                    ，仅真·破坏性命令仍被拦截。仅在授权靶场/授权测试环境使用。
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {AUTO_ALLOW_HOURS.map((h) => (
+                      <Button
+                        key={h}
+                        variant={hours === h ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => setHours(h)}
+                      >
+                        {h} 小时
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                disabled={busy}
+                onClick={(e) => {
+                  e.preventDefault();
+                  enable();
+                }}
+              >
+                {busy ? "开启中…" : "确认开启"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardContent>
+    </Card>
+  );
+}
+
+const ROE_MODES: { value: RoeMode; label: string; desc: string }[] = [
+  { value: "off", label: "关闭", desc: "只记录越界审计，不做任何拦截" },
+  { value: "warn", label: "警告", desc: "越界记审计并放行（默认）" },
+  { value: "strict", label: "严格", desc: "越界目标转人工审批，未批准不放行" },
+];
+
+/** RoE 三态：范围内目标才允许 agent 交互。 */
+function RoECard() {
+  const [mode, setMode] = React.useState<RoeMode>("warn");
+  const [loading, setLoading] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    api
+      .getRoE()
+      .then((r) => setMode(r.mode))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function pick(next: RoeMode) {
+    if (next === mode) return;
+    setBusy(true);
+    try {
+      const r = await api.setRoE(next);
+      setMode(r.mode);
+      toast.success(`RoE 范围强制已切换为「${ROE_MODES.find((m) => m.value === r.mode)?.label ?? r.mode}」`);
+    } catch (e) {
+      toast.error("切换失败：" + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-3 p-4">
+        <div className="flex items-center gap-2">
+          <ShieldAlertIcon className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-medium">RoE 授权范围</h3>
+          <span className="text-xs text-muted-foreground">Bash/HTTP 目标与任务 scope 比对</span>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-3">
+          {ROE_MODES.map((m) => (
+            <button
+              key={m.value}
+              type="button"
+              disabled={busy || loading}
+              onClick={() => pick(m.value)}
+              className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                mode === m.value
+                  ? "border-primary bg-primary/5"
+                  : "border-border hover:bg-muted/50"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{m.label}</span>
+                {mode === m.value && <Badge variant="secondary">当前</Badge>}
+              </div>
+              <p className="mt-0.5 text-xs text-muted-foreground">{m.desc}</p>
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          未登记任何 scope 的任务不启用拦截（开局拆目标阶段），批准子网段后 30 秒内生效。
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ---- page ----
 
 export default function InterceptPage() {
@@ -655,6 +880,7 @@ export default function InterceptPage() {
         <TabsList>
           <TabsTrigger value="rules">拦截规则</TabsTrigger>
           <TabsTrigger value="judge">模型配置</TabsTrigger>
+            <TabsTrigger value="guard">操作审查</TabsTrigger>
         </TabsList>
 
         {/* ---- tab: 拦截规则 ---- */}
@@ -756,6 +982,12 @@ export default function InterceptPage() {
         {/* ---- tab: 模型配置 ---- */}
         <TabsContent value="judge" className="mt-4">
           <JudgeCard />
+        </TabsContent>
+
+        {/* ---- tab: 操作审查（一键放行 / RoE）---- */}
+        <TabsContent value="guard" className="mt-4 flex flex-col gap-4">
+          <RoECard />
+          <AutoAllowCard />
         </TabsContent>
       </Tabs>
 

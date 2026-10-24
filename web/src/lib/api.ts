@@ -5,6 +5,7 @@
 
 import type { ChatMention } from "@/lib/chat-mentions";
 import type {
+  AutoAllowState,
   Credential,
   IntranetTopology,
   PendingScopeRow,
@@ -13,6 +14,7 @@ import type {
   SessionReadResult,
   ShellSession,
   TunnelInfo,
+  RoeMode,
 } from "@/lib/types";
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
@@ -1339,6 +1341,13 @@ export const api = {
   // 202 即返回，实际下载在后台跑，进度走 /api/update/stream。
   applyUpdate: () => post<{ ok: boolean; target: string }>(`/update/apply`),
   rollbackUpdate: () => post<{ ok: boolean }>(`/update/rollback`),
+  // ---- 操作审查：一键放行 / RoE 三态 ----
+  getAutoAllow: () => get<AutoAllowState>("/guard/auto-allow"),
+  setAutoAllow: (enabled: boolean, hours: number) =>
+    put<AutoAllowState>("/guard/auto-allow", { enabled, hours }),
+  getRoE: () => get<{ mode: RoeMode }>("/guard/roe"),
+  setRoE: (mode: RoeMode) => put<{ mode: RoeMode }>("/guard/roe", { mode }),
+
   // ---- 待授权网段（侦察发现 scope 外网段 → 人工批准扩 scope）----
   pendingScope: (taskId: string, all = false) =>
     get<{ items: PendingScopeRow[] }>(`/tasks/${encodeURIComponent(taskId)}/pending-scope${all ? "?all=1" : ""}`).then(
