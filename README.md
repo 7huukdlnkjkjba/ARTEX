@@ -62,6 +62,27 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ---
 
+## 内网作战（0.3.17 合并自 artex-ymh）
+
+0.3.17 在 0.3.16 主线上并入了二开分支的「外网突破 → 立足点 → 内网纵深」能力，与原有外网
+探索共用同一套双图、审批与范围强制：
+
+- **立足点**：PHP/JSP 加密 webshell 会话（注册/心跳/执行/文件读写/探活）、penelope 受管反弹 shell；
+- **侦察与隧道**：`session_recon` 被动侦察、suo5/chisel 自动选型与 `tunnel_*` 四件套、
+  任务级 MITM 热切换、内网拓扑图；
+- **阶段编排**：待授权网段审批扩 scope、外网→内网任务移交、内网期 worker 提示词变体；
+- **安全侧**：伪装门控、一键放行、RoE 三态、出口敏感信息审查、蜜罐识别（Cowrie/OpenCanary 等签名）、
+  chains 场景化思维链；
+- **部署**：`artex doctor` 预检、`packaging/tools-manifest.json` 工具钉版、systemd unit。
+
+细节与部署依赖（chisel / penelope / `ARTEX_CALLBACK_ADDR` 等）见 [README-FORK.md](README-FORK.md)
+与 `HONEYPOT-DETECTION-DESIGN.md`、`INTRANET-PIVOT-DESIGN.md`、`CHAINS-INTEGRATION-DESIGN.md`。
+
+> 0.3.17 的认证沿用 0.3.16 的 JWT 模型（未启用 refresh token / SSE ticket），流量代理保留
+> 0.3.15 的检索与回收实现。完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+---
+
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
