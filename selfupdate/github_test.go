@@ -67,7 +67,7 @@ func TestPrivateReleaseMetadataChecksumsAndDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sums, err := fetchSums(t.Context(), client, rel)
+	sums, _, err := fetchSums(t.Context(), client, rel)
 	if err != nil {
 		t.Fatal(err)
 	}

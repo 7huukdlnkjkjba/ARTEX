@@ -138,7 +138,7 @@ func TestScopeUnresolvedGoesToApproval(t *testing.T) {
 func ptrInt64(v int64) *int64 { return &v }
 
 // 目标抽取：URL / host:port / 裸 IP / 命令行参数 / 大小写与尾点归一。
-func TestExtractHosts(t *testing.T) {
+func TestScopeEnforceExtractHosts(t *testing.T) {
 	cases := []struct {
 		in   string
 		want []string

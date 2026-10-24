@@ -2,6 +2,59 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.17] - 2026-10-24
+
+本版把 artex-ymh 二开分支（外网突破 → 立足点 → 内网纵深）并入 0.3.16 主线，同时保留
+0.3.11–0.3.16 的全部上游能力与本地成本控制改造。合并基线为 v0.3.10、目标为 v0.3.16，
+按三方合并逐文件裁决；冲突处优先保留上游 0.3.16 语义，再补齐内网子系统所需装配。
+
+### 内网作战（并入自 artex-ymh）
+
+#### 新增的功能
+
+- **立足点会话管理**：PHP/JSP 加密 webshell 的注册、心跳、执行、文件读写、探活与删除；
+  会话密钥 AES-GCM 加密落库（`sessions` 表），前端「内网作战 → 会话」工作台可交互执行命令。
+- **反弹 shell**：penelope 作为受管子进程集成，`reverse_listen`/会话化管理，自带加密与进程回收。
+- **被动侦察**：`session_recon` 经立足点执行只读命令包（ip/route/neigh/netstat），解析后落资产图并推断高价值网段。
+- **多层代理隧道**：`tunnel_deploy/probe/list/teardown` 四件套；suo5（目标无出网）/ chisel（能出网）自动选型；
+  隧道状态变化热切换任务级 MITM 上游，后续 worker 流量自动走隧道（`server/taskproxy.go`）。
+- **内网拓扑**：「内网作战」页力导向图（主机/网段/存活链路）+ 会话/隧道/凭据三台账。
+- **凭据库**：凭据一等实体（捕获、来源血缘、复用），secret 加密存储（`credentials` 表）。
+- **阶段编排**：待授权网段（侦察发现 scope 外 /24 → 人工批准扩 scope）、外网→内网任务移交
+  （`POST /api/sessions/{id}/handoff` 建子任务）、内网期 worker 提示词变体（`worker.intranet`）。
+- **受管文件投递**：`stage` 暂存服务（随机 token 路径、硬 TTL、一次性下载即焚），
+  替代目标机上裸起 `python -m http.server`。
+- **伪装门控**：未过门控的请求返回逐字节固定的 nginx 欢迎页，随机入口路径 + HMAC cookie + 每 IP 限速。
+- **一键放行**：2/4/8h 限时审批豁免（deny 不豁免），到期自动恢复。
+- **RoE 范围强制三态**（off/warn/strict）与出口敏感信息审查、tarpit 抓取熔断、按任务稳定分配的 UA 池。
+- **蜜罐识别**：静态签名库（Cowrie/OpenCanary/Kippo/Glastopf/HFish/Dionaea）匹配 banner/HTTP/TLS，
+  资产写 `honeypot_score`/`honeypot_evidence`，planner 概览带疑似蜜罐清单与处置纪律。
+- **chains 场景化**：九类反问思维链骨架（web/ad/app/priv/pwn/recon/rev/pivot/meta）按意图
+  `chain_tags` 自动注入；按漏洞类别的反证判据与类别化转向提示。
+- **武器库与部署链**：17 项外部工具钉版清单（`packaging/tools-manifest.json`，启动自检 sha256）、
+  `artex doctor` 部署预检、systemd unit、`Dockerfile.source`。
+
+### 合并适配（与上游/本地改动的取舍）
+
+#### 修改的功能
+
+- **认证沿用 0.3.16 模型**：保留上游 JWT + 登录免责声明修复，未并入 fork 的 refresh token /
+  SSE 一次性 ticket（`/api/sse-ticket`、`/api/auth/refresh`、`/api/auth/logout` 不提供），
+  前端 SSE 仍走 `?token=`；`signJWT` 保留可选版本参数以兼容既有测试。
+- **流量代理沿用 0.3.16 实现**：保留 0.3.15 的检索/清空/空间回收与 `auto_vacuum`，未并入 fork 的
+  Basic 代理认证；`ProxyAddrRedacted`/`UpstreamProxy` 作为兼容读数补齐。
+- **命令拦截规则**：保留上游 0.3.15 的 V3「删除类接口路径」；fork 的 HTTP 暂存/横向/隧道/协议客户端
+  四组底线规则顺延为 V4–V7，新增「临时 HTTP 服务」规则独立为 `seedDefaultInterceptRulesHTTPStage`
+  （独立 settings 键，避免与上游 V3 撞车）。
+- **崩溃恢复语义**：`db/intercept.go` 保留 0.3.12 的审批筛选/`decision_source` 回填，
+  并在其上补 `CreateDecidedInterceptWithSource`（一键放行审计）。
+- **工具集**：`add_hint` 的「人新增了 N 条战略提示」planner 播报、`kill_work` 的人类接口绑定均已接回；
+  worker/planner/mainagent 统一挂 Guard（拦截 + RoE + 出口审查）。
+
+### 依赖
+
+- norma 保持 **v0.4.3**（上游 0.3.16 版本），fork 侧基于 v0.3.8 的代码已按新 API 适配。
+
 ## [Unreleased]
 
 ### 成本控制

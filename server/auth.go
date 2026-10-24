@@ -84,7 +84,7 @@ func loadOrCreateJWTKey(keyDir, dataDir string) ([]byte, error) {
 }
 
 // signJWT issues a 7-day HS256 token for user ARTEX.
-func signJWT(key []byte) (string, error) {
+func signJWT(key []byte, ver ...int64) (string, error) {
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
 		Subject:   "ARTEX",
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtTTL)),

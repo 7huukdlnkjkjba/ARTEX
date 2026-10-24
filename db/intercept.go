@@ -372,3 +372,33 @@ func (d *DB) listInterceptsPage(taskID string, page, size int, filter InterceptA
 	}
 	return out, total, rows.Err()
 }
+
+// CreateDecidedInterceptWithSource is CreateDecidedIntercept with an explicit
+// decision_source, bypassing interceptSource's ruleID/reason inference. Used by
+// the one-click auto-allow switch (source = "auto_allow") so the history row
+// shows the approval was unattended, not a human/model/rule decision.
+func (d *DB) CreateDecidedInterceptWithSource(ruleID, convID int64, taskID, agentName, toolName string, input []byte, status, reason, source string, audits ...*InterceptAudit) (int64, error) {
+	raw := json.RawMessage(input)
+	if len(raw) == 0 {
+		raw = json.RawMessage("{}")
+	}
+	var convIDPtr *int64
+	if convID != 0 {
+		convIDPtr = &convID
+	}
+	var taskIDPtr *string
+	if taskID != "" {
+		taskIDPtr = &taskID
+	}
+	// ruleID == 0 → NULL: the LLM fallback judge has no owning rule.
+	var ruleIDPtr *int64
+	if ruleID != 0 {
+		ruleIDPtr = &ruleID
+	}
+	var id int64
+	err := d.QueryRow(`
+INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, decision_source, audit)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10) RETURNING id`,
+		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, status, reason, source, firstAudit(audits)).Scan(&id)
+	return id, err
+}

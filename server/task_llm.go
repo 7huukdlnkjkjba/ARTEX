@@ -580,8 +580,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	wk.SetTaskProxyResolver(s.m.TaskProxyForTask) // 期 3b:按任务 MITM(经隧道时 任务实例→任务 socks)
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
+	wk.SetIntranetResolver(s.taskIntranet)           // 期 4:内网期(立足点/隧道)切 worker.intranet 提示词变体
+	wk.SetUAResolver(s.uaForTask)                    // 批 5 B4:按任务稳定分配的客户端 UA → BashEnv ARTEX_UA
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
@@ -597,9 +600,8 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	// (agentsForTask),Compactor 必须接在这里。走任务路由的 planner provider(§4:与 agent
 	// 同模型,随任务 LLM 链解析),压缩用 Complete 一次性生成 body。
 	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
-	// 管控钩子：上游快照里 planner 完全没有 Hooks，而它的工具集含 Bash——等于规划阶段
-	// 可绕过一切拦截与授权范围。补上（拦截规则 + 范围强制）。
-	pl.SetGuard(t.Guard)
+	// 管控钩子：planner 的工具集含 Bash，规划阶段同样要过拦截、RoE 与出口审查。
+	pl.SetGuard(s.agentGuard())
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	main.SetFindingRecorder(s.evidenceStore())
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
@@ -609,8 +611,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
-	// 管控钩子：mainagent 是人类接口但工具集含 Bash，同样要过拦截与范围强制。
-	main.SetGuard(t.Guard)
+	main.SetKillWork(func(intentID int64) error {
+		return s.engine.KillWorkAs(intentID, agent.AbortKilledByMainagent)
+	}) // kill_work：人立即终止运行中 work(killed_by_mainagent)
+	// 管控钩子：mainagent 是人类接口但工具集含 Bash，同样要过拦截、RoE 与出口审查。
+	main.SetGuard(s.agentGuard())
 	bundle := &taskAgentBundle{
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
 		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,

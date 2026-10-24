@@ -138,15 +138,15 @@ func buildScopeSet(rows []db.TaskScope) *taskScopeSet {
 		set.rows++
 		switch r.Kind {
 		case "root_domain":
-			if d := normalizeHost(firstNonEmpty(r.Domain, r.Value)); d != "" {
+			if d := normalizeScopeHost(firstNonEmpty(r.Domain, r.Value)); d != "" {
 				set.rootDomains[d] = true
 			}
 		case "subdomain":
-			if d := normalizeHost(firstNonEmpty(r.Domain, r.Value)); d != "" {
+			if d := normalizeScopeHost(firstNonEmpty(r.Domain, r.Value)); d != "" {
 				set.hosts[d] = true
 			}
 		case "ip":
-			if ip := normalizeHost(firstNonEmpty(r.Value, r.Domain)); ip != "" {
+			if ip := normalizeScopeHost(firstNonEmpty(r.Value, r.Domain)); ip != "" {
 				set.ips[ip] = true
 			}
 		case "cidr":
@@ -170,8 +170,8 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// normalizeHost 把 URL / host:port / 大小写 / 尾点统一成裸主机名。
-func normalizeHost(v string) string {
+// normalizeScopeHost 把 URL / host:port / 大小写 / 尾点统一成裸主机名。
+func normalizeScopeHost(v string) string {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return ""
@@ -198,7 +198,7 @@ func (s *taskScopeSet) hostInScope(host string) bool {
 	if s == nil || s.rows == 0 {
 		return true // 未登记范围：fail-open（由调用方记审计）
 	}
-	host = normalizeHost(host)
+	host = normalizeScopeHost(host)
 	if host == "" {
 		return true
 	}
@@ -245,7 +245,7 @@ func extractHosts(text string) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(h string) {
-		h = normalizeHost(h)
+		h = normalizeScopeHost(h)
 		if h == "" || seen[h] {
 			return
 		}

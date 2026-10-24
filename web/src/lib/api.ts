@@ -4,6 +4,16 @@
 // are passed through and formatted at the call site.
 
 import type { ChatMention } from "@/lib/chat-mentions";
+import type {
+  Credential,
+  IntranetTopology,
+  PendingScopeRow,
+  SessionExecResult,
+  SessionFsEntry,
+  SessionReadResult,
+  ShellSession,
+  TunnelInfo,
+} from "@/lib/types";
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
@@ -187,6 +197,10 @@ function mockReport(_task?: string): string {
 > （demo）本报告由 mock 数据生成，仅用于界面演示。`;
 }
 
+export function sseUrlAsync(path: string): Promise<string> {
+  return Promise.resolve(sseUrl(path));
+}
+
 export function sseUrl(path: string): string {
   const base =
     process.env.NEXT_PUBLIC_SSE_BASE ??
@@ -233,11 +247,16 @@ function interceptPageQuery(page: number, size: number, filter: InterceptApprova
   return query.toString();
 }
 
+// 内网作战页四个列表的 ?task_id= 过滤参数(空 = 全局视图)。
+const taskQuery = (taskId?: string) => (taskId ? `?task_id=${encodeURIComponent(taskId)}` : "");
+
 export const api = {
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
   health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
 
   // ---- auth ----
+  // 本地登出：服务端 refresh token 端点已按 0.3.16 认证模型移除，仅清本地态。
+  logout: async () => {},
   authStatus: () => get<{ initialized: boolean }>("/auth/status"),
   login: (username: string, password: string) => post<{ token: string }>("/auth/login", { username, password }),
   initPassword: (password: string) => post<{ token: string }>("/auth/init", { password }),
@@ -1320,4 +1339,51 @@ export const api = {
   // 202 即返回，实际下载在后台跑，进度走 /api/update/stream。
   applyUpdate: () => post<{ ok: boolean; target: string }>(`/update/apply`),
   rollbackUpdate: () => post<{ ok: boolean }>(`/update/rollback`),
+  // ---- 待授权网段（侦察发现 scope 外网段 → 人工批准扩 scope）----
+  pendingScope: (taskId: string, all = false) =>
+    get<{ items: PendingScopeRow[] }>(`/tasks/${encodeURIComponent(taskId)}/pending-scope${all ? "?all=1" : ""}`).then(
+      (r) => arr(r.items),
+    ),
+  decidePendingScope: (id: number, action: "approve" | "dismiss") =>
+    post<PendingScopeRow>(`/pending-scope/${id}/decide`, { action }),
+
+  // ---- 内网作战（拓扑 / 会话 / 隧道 / 凭据）----
+  // 四个列表都支持可选 taskId(拼 ?task_id=);不传保持全局视图。
+  intranetTopology: (taskId?: string) =>
+    get<IntranetTopology>(`/intranet/topology${taskQuery(taskId)}`).then((r) => ({
+      nodes: arr(r.nodes),
+      edges: arr(r.edges),
+      segments: arr(r.segments),
+    })),
+  shellSessions: (taskId?: string) =>
+    get<{ items: ShellSession[] }>(`/sessions${taskQuery(taskId)}`).then((r) => arr(r.items)),
+  // timeout 单位为秒，省略则由后端用默认值。
+  sessionExec: (id: string, command: string, timeout?: number) =>
+    post<SessionExecResult>(`/sessions/${encodeURIComponent(id)}/exec`, {
+      command,
+      ...(timeout ? { timeout } : {}),
+    }),
+  sessionList: (id: string, path: string) =>
+    post<{ entries: SessionFsEntry[] }>(`/sessions/${encodeURIComponent(id)}/list`, { path }).then((r) =>
+      arr(r.entries),
+    ),
+  sessionRead: (id: string, path: string) =>
+    post<SessionReadResult>(`/sessions/${encodeURIComponent(id)}/read`, { path }),
+  sessionWrite: (id: string, path: string, contentBase64: string) =>
+    post<{ ok: boolean; bytes: number }>(`/sessions/${encodeURIComponent(id)}/write`, {
+      path,
+      content_base64: contentBase64,
+    }),
+  // 人工探活:成功 alive=true;失败 alive=false 且 error 带原因(后端已诚实标 dead)。
+  probeSession: (id: string) =>
+    post<{ alive: boolean; ms?: number; error?: string }>(`/sessions/${encodeURIComponent(id)}/probe`),
+  // 移交内网:以该会话的立足点主机为初始 scope 创建新内网任务,返回新任务 id(字符串)。
+  // 400 = 无法确定立足点 IP;404 = 会话不存在。
+  handoffSession: (id: string) => post<{ task_id: string }>(`/sessions/${encodeURIComponent(id)}/handoff`),
+  deleteSession: (id: string) => del<{ ok: boolean }>(`/sessions/${encodeURIComponent(id)}`),
+  tunnels: (taskId?: string) =>
+    get<{ items: TunnelInfo[] }>(`/tunnels${taskQuery(taskId)}`).then((r) => arr(r.items)),
+  teardownTunnel: (id: string) => post<{ ok: boolean }>(`/tunnels/${encodeURIComponent(id)}/teardown`),
+  credentials: (taskId?: string) =>
+    get<{ items: Credential[] }>(`/credentials${taskQuery(taskId)}`).then((r) => arr(r.items)),
 };

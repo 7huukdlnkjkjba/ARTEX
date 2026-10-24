@@ -309,6 +309,19 @@ func (t *Traffic) ProxyAddr() string {
 	return "http://" + t.addr
 }
 
+// ProxyAddrRedacted is ProxyAddr with credentials masked — safe for logs.
+// (Proxy authentication is not enabled in this build, so it is identical.)
+func (t *Traffic) ProxyAddrRedacted() string { return t.ProxyAddr() }
+
+// UpstreamProxy returns the current egress proxy URL ("" = direct dial).
+// Observability/test hook for the hot-swappable upstream.
+func (t *Traffic) UpstreamProxy() string {
+	if u := t.upstream.Load(); u != nil {
+		return u.String()
+	}
+	return ""
+}
+
 // SetUpstreamProxy points every captured request at a global egress proxy
 // (http/https/socks5, optional user:pass in the URL). An empty raw string clears
 // it, restoring direct dialing. The change is atomic and takes effect on the next
