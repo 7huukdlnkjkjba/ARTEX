@@ -7,8 +7,11 @@ package traffic
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -101,6 +105,11 @@ const (
 	maxBlobRead = 8 * 1024
 )
 
+// TrafficSearchDescription is persisted into the tool catalog for new and
+// upgraded installations. Keep it in the traffic package so the runtime tool
+// and the catalog migration cannot drift apart.
+const TrafficSearchDescription = "查询记录代理已抓取的目标流量（必须指定 host；支持裸主机、主机:端口或完整 URL，可再按 URL 子串或正文关键词过滤）。指定端口时只返回该服务的流量，避免同一 IP 的不同端口串包。body_contains 会在已抓取的请求/响应头与正文中做全文搜索，支持任意子串和中文（至少 3 个字符）。仅返回极轻量索引(id/method/url/status/resp_len)，不含响应内容；结果非空后必须用 traffic_get 逐条核实请求/响应，再把确实支持当前漏洞的 ID 交给 bind_finding_traffic。默认只返回 3 条、每页最多 10 条；结果多时用 page 翻页。"
+
 // Traffic runs the recording proxy and owns the file tree + index.
 type Traffic struct {
 	dir   string
@@ -119,7 +128,14 @@ type Traffic struct {
 	// pass is the set of hosts whose MITM interception failed for a proxy/protocol
 	// reason; connections to them are tunneled transparently (fail-open) so the
 	// request still reaches the target — unrecorded — instead of being killed.
-	pass sync.Map // hostname(string) -> struct{}
+	// Entries expire after passTTL: a transient failure must not blind the
+	// recorder to a host forever, so the next connection after expiry retries
+	// MITM + recording.
+	pass passList
+	// auth holds the proxy's Basic credentials; nil = authentication disabled
+	// (ARTEX_PROXY_AUTH=off, only acceptable on loopback-only deployments).
+	// See resolveProxyAuth.
+	auth *proxyAuth
 	// upstream is the global egress proxy every captured request is forwarded
 	// through (nil = dial targets directly). Both the intercepted and the
 	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
@@ -130,9 +146,19 @@ type Traffic struct {
 // Open initializes the traffic tree, blob store and SQLite index under dir.
 func Open(dir, addr string) (*Traffic, error) {
 	for _, d := range []string{dir, filepath.Join(dir, "_index"), filepath.Join(dir, "_blobs"), filepath.Join(dir, "_ca")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		// 0o700 plus an explicit chmod: MkdirAll does not tighten a pre-existing
+		// directory. Recordings hold target credentials and _ca the CA private
+		// key, so the tree is owner-only (F11c).
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
+		_ = os.Chmod(d, 0o700) // best-effort on filesystems without mode bits
+	}
+	// F2-1: resolve client credentials before anything can fail behind an open
+	// db handle. Auth on by default; see resolveProxyAuth for the env switches.
+	auth, err := resolveProxyAuth(dir)
+	if err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", filepath.Join(dir, "_index", "index.sqlite"))
 	if err != nil {
@@ -148,7 +174,13 @@ func Open(dir, addr string) (*Traffic, error) {
 		db.Close()
 		return nil, err
 	}
-	t := &Traffic{dir: dir, addr: addr, db: db}
+	// The SQLite driver creates index files under the process umask; tighten
+	// them explicitly (F11c).
+	indexPath := filepath.Join(dir, "_index", "index.sqlite")
+	for _, f := range []string{indexPath, indexPath + "-wal", indexPath + "-shm"} {
+		chmodIfExists(f, 0o600)
+	}
+	t := &Traffic{dir: dir, addr: addr, db: db, auth: auth}
 	if _, err := db.Exec(ftsSchema); err != nil {
 		log.Printf("[traffic] 全文索引不可用，正文搜索将被禁用（元数据搜索不受影响）：%v", err)
 	} else {
@@ -157,13 +189,25 @@ func Open(dir, addr string) (*Traffic, error) {
 
 	p, err := mproxy.NewProxy(&mproxy.Options{
 		Addr:        addr,
-		SslInsecure: true,
+		SslInsecure: sslInsecure(),
 		CaRootPath:  filepath.Join(dir, "_ca"),
 	})
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
+	// F2-1: require Basic proxy credentials on every request — plain requests
+	// AND CONNECT tunnels both pass through go-mitmproxy's auth hook; failures
+	// get a 407 from the entry. Even if the listener is accidentally bound to a
+	// non-loopback interface, the proxy is not an open relay.
+	if auth != nil {
+		p.SetAuthProxy(auth.check)
+	}
+	// go-mitmproxy wrote (or rewrote) the CA during NewProxy; its key signs
+	// every intercepted certificate, so keep the whole tree owner-only (F11c).
+	chmodCATree(filepath.Join(dir, "_ca"))
+	// One-time sweep tightening files/dirs written by older versions.
+	t.migratePerms()
 	// Upstream selection. By default (no global egress proxy set) targets are
 	// dialed DIRECTLY: go-mitmproxy's own default upstream uses
 	// http.ProxyFromEnvironment, so an HTTP_PROXY/HTTPS_PROXY in the environment
@@ -177,12 +221,238 @@ func Open(dir, addr string) (*Traffic, error) {
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
 	p.SetShouldInterceptRule(func(req *http.Request) bool {
-		_, tunnel := t.pass.Load(hostOnly(req.Host))
-		return !tunnel
+		return !t.pass.tunneled(hostOnly(req.Host))
 	})
 	p.AddAddon(&sink{t: t})
 	t.proxy = p
 	return t, nil
+}
+
+// proxyAuth holds the Basic credentials the recording proxy requires from its
+// clients (worker bash env, WebFetch, browser MCP). Auth exists so that a
+// proxy accidentally bound to a non-loopback interface is not an open relay.
+type proxyAuth struct {
+	user   string
+	pass   string
+	header string // expected "Basic <base64(user:pass)>" Proxy-Authorization value
+}
+
+// resolveProxyAuth decides the proxy's client credentials (F2-1):
+//   - env ARTEX_PROXY_AUTH="off"/"0"/"false" → authentication disabled. Only
+//     acceptable on a pure-loopback deployment; a warning is logged.
+//   - env ARTEX_PROXY_AUTH="user:pass" → explicit credentials.
+//   - unset → load <dir>/_auth; if missing, generate a random password with
+//     crypto/rand and persist it there (0600). The password is never logged —
+//     only the file path is.
+func resolveProxyAuth(dir string) (*proxyAuth, error) {
+	v := strings.TrimSpace(os.Getenv("ARTEX_PROXY_AUTH"))
+	switch {
+	case strings.EqualFold(v, "off") || v == "0" || strings.EqualFold(v, "false"):
+		log.Printf("[traffic] 警告：代理认证已关闭（ARTEX_PROXY_AUTH=%s），仅在纯 loopback 监听下可接受", v)
+		return nil, nil
+	case v != "":
+		user, pass, ok := strings.Cut(v, ":")
+		if !ok || user == "" || pass == "" {
+			return nil, fmt.Errorf("ARTEX_PROXY_AUTH 需要 user:pass 形式（或 off 关闭认证），当前值无效")
+		}
+		return newProxyAuth(user, pass), nil
+	}
+	path := filepath.Join(dir, "_auth")
+	if b, err := os.ReadFile(path); err == nil {
+		var stored struct {
+			User string `json:"user"`
+			Pass string `json:"pass"`
+		}
+		if json.Unmarshal(b, &stored) == nil && stored.User != "" && stored.Pass != "" {
+			return newProxyAuth(stored.User, stored.Pass), nil
+		}
+		log.Printf("[traffic] 代理凭据文件 %s 无法解析，将重新生成", path)
+	}
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, fmt.Errorf("生成代理凭据: %w", err)
+	}
+	// hex keeps the password free of characters that need URL-escaping in
+	// http://user:pass@host proxy URLs.
+	a := newProxyAuth("artex", hex.EncodeToString(raw))
+	b, _ := json.Marshal(map[string]string{"user": a.user, "pass": a.pass})
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return nil, fmt.Errorf("保存代理凭据: %w", err)
+	}
+	_ = os.Chmod(path, 0o600) // umask backstop
+	log.Printf("[traffic] 已生成代理访问凭据并保存到 %s（0600；口令只存在于该文件，不打印日志）", path)
+	return a, nil
+}
+
+func newProxyAuth(user, pass string) *proxyAuth {
+	return &proxyAuth{
+		user:   user,
+		pass:   pass,
+		header: "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass)),
+	}
+}
+
+// check is the go-mitmproxy SetAuthProxy hook: the request must carry matching
+// Basic credentials (constant-time compare) or the proxy entry answers 407. On
+// a match the Proxy-Authorization header is stripped so the password is
+// neither recorded by the sink nor forwarded to the target.
+func (a *proxyAuth) check(_ http.ResponseWriter, req *http.Request) (bool, error) {
+	got := req.Header.Get("Proxy-Authorization")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(a.header)) != 1 {
+		return false, errors.New("missing or invalid Proxy-Authorization")
+	}
+	req.Header.Del("Proxy-Authorization")
+	return true, nil
+}
+
+// sslInsecure reports whether the MITM accepts any target certificate. Default
+// true — historical behavior, and pentest targets routinely have broken or
+// self-signed TLS. Set env ARTEX_PROXY_SSL_INSECURE=0/false to verify target
+// certificates instead: safer against target-side MitM, but expect many
+// targets to fail interception and fall back to transparent passthrough
+// (unrecorded). Leave it on unless the engagement forbids it.
+func sslInsecure() bool {
+	v := strings.TrimSpace(os.Getenv("ARTEX_PROXY_SSL_INSECURE"))
+	return !(v == "0" || strings.EqualFold(v, "false"))
+}
+
+const (
+	// passTTL bounds how long a host stays in transparent passthrough after a
+	// proxy-caused MITM failure. When it lapses the host is retried with MITM +
+	// recording — a one-off hiccup no longer blinds the recorder permanently.
+	passTTL = 30 * time.Minute
+	// passMax caps the passthrough set; at the cap the oldest entry is evicted
+	// (and therefore retried), so a flood of failing hosts cannot grow it
+	// without bound.
+	passMax = 256
+)
+
+// passList is the set of hosts currently tunneled transparently (Traffic.pass),
+// with TTL expiry and a size cap. The zero value is ready to use.
+type passList struct {
+	mu  sync.Mutex
+	m   map[string]time.Time // host -> when it was flagged
+	now func() time.Time     // test hook; nil → time.Now
+}
+
+func (l *passList) time() time.Time {
+	if l.now != nil {
+		return l.now()
+	}
+	return time.Now()
+}
+
+// flag marks host for passthrough. already is true when the host was flagged
+// before and its TTL has not lapsed (so callers log only on the transition).
+func (l *passList) flag(host string) (already bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m == nil {
+		l.m = make(map[string]time.Time)
+	}
+	now := l.time()
+	if t, ok := l.m[host]; ok && now.Sub(t) < passTTL {
+		return true
+	}
+	if _, ok := l.m[host]; !ok && len(l.m) >= passMax {
+		l.evictOldestLocked()
+	}
+	l.m[host] = now
+	return false
+}
+
+// tunneled reports whether host is currently in the passthrough set. An
+// expired entry is dropped on lookup, so the host transparently returns to
+// MITM + recording once its TTL lapses.
+func (l *passList) tunneled(host string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t, ok := l.m[host]
+	if !ok {
+		return false
+	}
+	if l.time().Sub(t) >= passTTL {
+		delete(l.m, host)
+		return false
+	}
+	return true
+}
+
+// evictOldestLocked drops the stalest entry; the evicted host is retried with
+// MITM on its next connection, which is the desired behavior under pressure.
+func (l *passList) evictOldestLocked() {
+	var oldest string
+	var oldestT time.Time
+	first := true
+	for h, t := range l.m {
+		if first || t.Before(oldestT) {
+			oldest, oldestT, first = h, t, false
+		}
+	}
+	delete(l.m, oldest)
+}
+
+// chmodIfExists tightens one file, ignoring a missing path (the SQLite WAL/SHM
+// sidecars only exist once the database has been written).
+func chmodIfExists(path string, mode os.FileMode) {
+	if err := os.Chmod(path, mode); err != nil && !os.IsNotExist(err) {
+		log.Printf("[traffic] 收紧权限 %s 失败：%v", path, err)
+	}
+}
+
+// chmodCATree tightens the CA directory go-mitmproxy writes on startup (the CA
+// private key signs every intercepted certificate — treat it as a root
+// secret). Runs on every Open because the library may regenerate files.
+func chmodCATree(caDir string) {
+	_ = filepath.WalkDir(caDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil {
+			return nil
+		}
+		if d.IsDir() {
+			_ = os.Chmod(p, 0o700)
+		} else {
+			_ = os.Chmod(p, 0o600)
+		}
+		return nil
+	})
+}
+
+// permsMigrationMarker names the sentinel written once the one-time permission
+// migration (F11c: files 0644→0600, dirs 0755→0700) has swept the tree. New
+// writes are already created with tight modes, so the sweep runs only once —
+// without the marker every startup would stat every legacy capture file
+// (legacy trees can hold hundreds of thousands).
+const permsMigrationMarker = "_index/perms-v1.done"
+
+// migratePerms tightens files/dirs written by older versions. Idempotent and
+// best-effort: any failure skips the marker so the sweep retries on the next
+// start.
+func (t *Traffic) migratePerms() {
+	marker := filepath.Join(t.dir, permsMigrationMarker)
+	if _, err := os.Stat(marker); err == nil {
+		return
+	}
+	failed := false
+	_ = filepath.WalkDir(t.dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil {
+			return nil
+		}
+		mode := os.FileMode(0o600)
+		if d.IsDir() {
+			mode = 0o700
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			failed = true
+		}
+		return nil
+	})
+	if failed {
+		log.Printf("[traffic] 部分历史文件权限迁移失败，下次启动将重试")
+		return
+	}
+	if err := os.WriteFile(marker, []byte("0600/0700\n"), 0o600); err != nil {
+		log.Printf("[traffic] 写权限迁移标记失败：%v", err)
+	}
 }
 
 // hostOnly strips an optional :port, so passthrough keys match whether the host
@@ -194,8 +464,48 @@ func hostOnly(hostport string) string {
 	return hostport
 }
 
-// ProxyAddr returns the address workers should set as HTTP(S)_PROXY.
-func (t *Traffic) ProxyAddr() string { return "http://127.0.0.1" + t.addr }
+// proxyLoopbackHost normalizes the listen address for client URLs: a bare
+// ":port" bind means all interfaces, but clients always reach the proxy via
+// loopback. A host-ful address (e.g. "127.0.0.1:8788") is used as-is.
+func proxyLoopbackHost(addr string) string {
+	if h, p, err := net.SplitHostPort(addr); err == nil {
+		if h == "" {
+			h = "127.0.0.1"
+		}
+		return net.JoinHostPort(h, p)
+	}
+	return addr
+}
+
+// ProxyAddr returns the proxy URL workers should set as HTTP(S)_PROXY. With
+// proxy authentication on (the default) the Basic credentials are embedded —
+// http://user:pass@127.0.0.1:port — so every consumer (bash env, WebFetch,
+// browser MCP) authenticates transparently. This is the single source of
+// truth for the credentialed address; logs must use ProxyAddrRedacted.
+func (t *Traffic) ProxyAddr() string {
+	host := proxyLoopbackHost(t.addr)
+	if t.auth == nil {
+		return "http://" + host
+	}
+	return (&url.URL{
+		Scheme: "http",
+		User:   url.UserPassword(t.auth.user, t.auth.pass),
+		Host:   host,
+	}).String()
+}
+
+// ProxyAddrRedacted is ProxyAddr with the password masked — safe for logs.
+func (t *Traffic) ProxyAddrRedacted() string {
+	host := proxyLoopbackHost(t.addr)
+	if t.auth == nil {
+		return "http://" + host
+	}
+	return (&url.URL{
+		Scheme: "http",
+		User:   url.UserPassword(t.auth.user, "****"),
+		Host:   host,
+	}).String()
+}
 
 // SetUpstreamProxy points every captured request at a global egress proxy
 // (http/https/socks5, optional user:pass in the URL). An empty raw string clears
@@ -246,12 +556,28 @@ func (t *Traffic) CACertPath() string {
 // Start runs the proxy (blocking); run in a goroutine.
 func (t *Traffic) Start() error { return t.proxy.Start() }
 
-// Close waits for background tree reclamation to finish before closing the
-// index, so shutdown never leaves a goroutine unlinking files out from under a
-// removed data directory.
+// UpstreamProxy returns the current egress proxy URL ("" = direct dial).
+// Observability/test hook for the hot-swappable upstream (SetUpstreamProxy).
+func (t *Traffic) UpstreamProxy() string {
+	if u := t.upstream.Load(); u != nil {
+		return u.String()
+	}
+	return ""
+}
+
+// Close stops the listener and waits for background tree reclamation to finish
+// before closing the index, so shutdown never leaves a goroutine unlinking files
+// out from under a removed data directory. proxy.Close has a known attacker-
+// goroutine leak in go-mitmproxy (ROADMAP.md 6.3 spike) — accepted because
+// instance count is bounded by task count (per-task instances, 期 3b) and the
+// global one closes only at process exit.
 func (t *Traffic) Close() error {
 	t.reaping.Wait()
-	return t.db.Close()
+	err := t.proxy.Close()
+	if derr := t.db.Close(); err == nil {
+		err = derr
+	}
+	return err
 }
 func (t *Traffic) DB() *sql.DB { return t.db }
 
@@ -285,8 +611,8 @@ func (t *Traffic) maybePassthrough(f *mproxy.Flow, err error) {
 	if host == "" {
 		return
 	}
-	if _, loaded := t.pass.LoadOrStore(host, struct{}{}); !loaded {
-		log.Printf("[traffic] 与 %s 的 MITM 出错，改为透传（该 host 后续直连目标、不再记录，但请求照常）：%v", host, err)
+	if !t.pass.flag(host) {
+		log.Printf("[traffic] 与 %s 的 MITM 出错，改为透传（该 host 后续直连目标、不再记录，但请求照常；%s 后自动重试录制）：%v", host, passTTL, err)
 	}
 }
 
@@ -415,13 +741,13 @@ func (t *Traffic) spill(body []byte, contentType string) storedBody {
 	// One bucket level (256 buckets) is enough to keep any single directory small;
 	// the store only ever holds bodies above maxInlineBody, deduplicated by hash.
 	blobDir := filepath.Join(t.dir, "_blobs", "sha256", h[:2])
-	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+	if err := os.MkdirAll(blobDir, 0o700); err != nil {
 		log.Printf("[traffic] 创建 blob 目录失败：%v", err)
 		return storedBody{inline: clipBytes(body, blobPreview), index: indexText()}
 	}
 	blobPath := filepath.Join(blobDir, h+".bin")
 	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
-		if err := os.WriteFile(blobPath, body, 0o644); err != nil {
+		if err := os.WriteFile(blobPath, body, 0o600); err != nil {
 			log.Printf("[traffic] 写 blob %s 失败：%v", h, err)
 			return storedBody{inline: clipBytes(body, blobPreview), index: indexText()}
 		}
@@ -1474,8 +1800,24 @@ func (t *Traffic) query(host, contains, bodyContains string, page, limit int) ([
 	q := `SELECT id,ts,host,method,url_template,url,status,content_type,resp_len,path FROM exchanges WHERE 1=1`
 	args := []any{}
 	if host != "" {
+		hostName, port, err := normalizeSearchHost(host)
+		if err != nil {
+			return nil, err
+		}
 		q += ` AND host=?`
-		args = append(args, host)
+		args = append(args, hostName)
+		if port != "" {
+			// Recorded rows historically store URL.Hostname() (without the port),
+			// so constrain the original URL authority as a compatibility fallback.
+			// New and old captures therefore share the same search contract.
+			authority := net.JoinHostPort(hostName, port)
+			q += ` AND (url LIKE ? OR url LIKE ? OR url LIKE ?)`
+			args = append(args,
+				"%://"+authority+"/%",
+				"%://"+authority+"?%",
+				"%://"+authority,
+			)
+		}
 	}
 	if contains != "" {
 		q += ` AND (url LIKE ? OR url_template LIKE ?)`
@@ -1510,6 +1852,42 @@ func (t *Traffic) query(host, contains, bodyContains string, page, limit int) ([
 	return out, rows.Err()
 }
 
+// normalizeSearchHost accepts the forms agents commonly have at hand while
+// keeping the stored host (URL.Hostname()) as the canonical host key. A port,
+// when supplied, is applied to the URL authority so captures from different
+// services on the same IP cannot be mixed.
+func normalizeSearchHost(raw string) (host, port string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", errors.New("host 为必填参数")
+	}
+	if strings.Contains(raw, "://") {
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil || u.Host == "" {
+			return "", "", fmt.Errorf("无法解析 host：%q", raw)
+		}
+		host, port = u.Hostname(), u.Port()
+	} else if h, p, splitErr := net.SplitHostPort(raw); splitErr == nil {
+		host, port = h, p
+	} else if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		host = strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]")
+	} else {
+		host = raw
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return "", "", fmt.Errorf("无法解析 host：%q", raw)
+	}
+	if port != "" {
+		p, parseErr := strconv.Atoi(port)
+		if parseErr != nil || p < 1 || p > 65535 {
+			return "", "", fmt.Errorf("端口无效：%q", port)
+		}
+		port = strconv.Itoa(p)
+	}
+	return strings.ToLower(host), port, nil
+}
+
 // Tools exposes traffic lookup to work agents so they query already-captured
 // traffic instead of re-curling the same resource (token + dedup win).
 func (t *Traffic) Tools() []actool.CoreTool {
@@ -1520,11 +1898,11 @@ func (t *Traffic) Tools() []actool.CoreTool {
 
 	search := actool.Build(actool.Spec{
 		Name:        "traffic_search",
-		Description: "查询记录代理已抓取的目标流量（必须指定 host，可再按 URL 子串或正文关键词过滤）。body_contains 会在已抓取的请求/响应头与正文中做全文搜索，支持任意子串和中文（至少 3 个字符），可用来找响应里的密码、密钥、报错、内网地址等。仅返回极轻量索引(id/method/url/status/resp_len)，不含任何响应内容。默认只返回 3 条、每页最多 10 条；结果多时用 page 翻页（page=0 起）；要看某条的请求/响应原文用 traffic_get(id)。回看已访问资源、找端点先用它，避免重复 curl 同一 URL。",
+		Description: TrafficSearchDescription,
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"host":          map[string]any{"type": "string", "description": "按主机过滤（必填，如 '107.172.96.177:8082'）"},
+				"host":          map[string]any{"type": "string", "description": "按主机过滤（必填；如 '107.172.96.177'、'107.172.96.177:8082' 或 'http://107.172.96.177:8082/path'）"},
 				"contains":      map[string]any{"type": "string", "description": "URL 子串过滤（可选，如 'api' / 'login'）"},
 				"body_contains": map[string]any{"type": "string", "description": "正文全文搜索（可选，至少 3 个字符），匹配请求/响应的头与正文，如 'password' / 'root:x:0' / '内网测试'"},
 				"limit":         map[string]any{"type": "integer", "description": "每页条数，默认 3，最大 10"},
@@ -1543,7 +1921,7 @@ func (t *Traffic) Tools() []actool.CoreTool {
 			}
 			_ = json.Unmarshal(in, &a)
 			if strings.TrimSpace(a.Host) == "" {
-				return actool.Errorf("host 为必填参数：请指定要查询的主机（如 '107.172.96.177:8082'），避免全库扫描。"), nil
+				return actool.Errorf("host 为必填参数：请指定裸主机、主机:端口或完整 URL，避免全库扫描。"), nil
 			}
 			rows, err := t.query(a.Host, a.Contains, a.BodyContains, a.Page, a.Limit)
 			if err != nil {

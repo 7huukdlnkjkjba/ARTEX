@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -118,7 +119,7 @@ func (p *pendingManager) remove(id int64) {
 // as a Decision (Action ∈ allow|ask|deny; empty Action means the reply could not
 // be parsed). It is injected by the server layer so the intercept package stays
 // free of any llm dependency. profileID == 0 means "use the active/default profile".
-type Reviewer func(ctx context.Context, profileID int64, prompt, tool, command string) (Decision, error)
+type Reviewer func(ctx context.Context, profileID int64, prompt string, input ReviewInput) (Decision, error)
 
 // Interceptor loads intercept rules from the database and evaluates them on
 // tool calls. It is safe for concurrent use.
@@ -144,6 +145,8 @@ var defaultEnabledTools = []string{
 	"Bash", "WebFetch", "web_search",
 	"shell_open", "shell_send",
 	"Write", "Edit", "MultiEdit",
+	// 立足点会话工具(期 1a):登记 webshell 与目标侧命令/文件操作,默认进拦截规则体系。
+	"register_session", "session_exec", "session_read", "session_write",
 }
 
 // New creates an Interceptor backed by d. The rule cache is lazy-loaded on
@@ -229,7 +232,9 @@ func (i *Interceptor) rules() ([]compiledRule, error) {
 
 // IsToolEnabled returns true if the named tool is in the intercept-enabled set
 // (i.e. it should enter the rule-matching path). Uses the same double-check lock
-// pattern as rules().
+// pattern as rules(). Fail-closed: if the configuration cannot be loaded the
+// tool is NOT exempted — it enters the intercept flow, where Match fails closed
+// on the same load error.
 func (i *Interceptor) IsToolEnabled(name string) bool {
 	i.mu.RLock()
 	if i.enabledTools != nil {
@@ -242,7 +247,10 @@ func (i *Interceptor) IsToolEnabled(name string) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.enabledTools == nil {
-		_ = i.loadLocked()
+		if err := i.loadLocked(); err != nil {
+			log.Printf("[intercept] 启用工具列表加载失败,工具 %s 按 fail-closed 进入拦截流程: %v", name, err)
+			return true
+		}
 	}
 	return i.enabledTools[name]
 }
@@ -283,16 +291,18 @@ func (i *Interceptor) SetEnabledTools(tools []string) error {
 
 // Decision is the outcome of a successful rule match.
 type Decision struct {
-	ModelFallback  bool
-	RuleName       string
-	ConfigDigest   string
-	ProfileID      int64
-	Action         string // "allow" | "deny" | "ask"
-	Message        string
-	RuleID         int64
-	TimeoutEnabled bool
-	TimeoutSeconds int
-	TimeoutAction  string // "deny" | "allow"
+	ModelInput       json.RawMessage
+	ModelInputDigest string
+	ModelFallback    bool
+	RuleName         string
+	ConfigDigest     string
+	ProfileID        int64
+	Action           string // "allow" | "deny" | "ask"
+	Message          string
+	RuleID           int64
+	TimeoutEnabled   bool
+	TimeoutSeconds   int
+	TimeoutAction    string // "deny" | "allow"
 }
 
 // --- LLM fallback judge ---
@@ -308,10 +318,12 @@ const (
 	settingJudgeAskTimeoutAction = "llm_judge_ask_timeout_action"
 )
 
-// Judge default values.
+// Judge default values. Fail-closed: a judge failure defaults to "ask" (a human
+// decides; unattended asks time out to deny — see defaultJudgeAskTimeoutAction),
+// never silently to "allow".
 const (
 	defaultJudgeTimeoutSecs      = 15
-	defaultJudgeFailAction       = "allow"
+	defaultJudgeFailAction       = "ask"
 	defaultJudgeAskTimeoutSecs   = 300
 	defaultJudgeAskTimeoutAction = "deny"
 )
@@ -424,7 +436,7 @@ func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
 // keeps the current behavior: allow). On model error or an unparseable reply it
 // falls back to the configured FailAction. Ask verdicts carry the human-approval
 // timeout so the existing HandleAsk consumes them unchanged.
-func (i *Interceptor) Judge(ctx context.Context, tool, command string) (Decision, bool) {
+func (i *Interceptor) Judge(ctx context.Context, tool string, arguments json.RawMessage) (Decision, bool) {
 	cfg := i.judgeConfig()
 	i.mu.RLock()
 	rv := i.reviewer
@@ -440,7 +452,19 @@ func (i *Interceptor) Judge(ctx context.Context, tool, command string) (Decision
 		defer cancel()
 	}
 
-	out, err := rv(cctx, cfg.ProfileID, cfg.Prompt, tool, command)
+	input, contextErr := BuildReviewInput(cctx, tool, arguments)
+	cfg.Prompt = EffectiveJudgePrompt(cfg.Prompt)
+	var out Decision
+	var err error
+	var modelInput []byte
+	if contextErr != nil {
+		// Invalid current arguments cannot be reviewed faithfully, regardless of
+		// the configured model-failure strategy. A human must resolve the input.
+		out = Decision{Action: "ask", ModelFallback: true, Message: "审查上下文不完整，需要人工确认：" + contextErr.Error()}
+	} else {
+		modelInput, _ = json.Marshal(input)
+		out, err = rv(cctx, cfg.ProfileID, cfg.Prompt, input)
+	}
 	if err != nil {
 		out = Decision{ProfileID: out.ProfileID, ModelFallback: true, Action: cfg.FailAction, Message: "模型审批失败,按失败策略处理: " + err.Error()}
 	}
@@ -452,6 +476,10 @@ func (i *Interceptor) Judge(ctx context.Context, tool, command string) (Decision
 	}
 	// A model verdict never carries a rule; keep RuleID 0 (→ NULL) for history.
 	out.RuleID = 0
+	if len(modelInput) > 0 {
+		out.ModelInput = modelInput
+		out.ModelInputDigest = digestInput(modelInput)
+	}
 	if out.ProfileID != 0 {
 		cfg.ProfileID = out.ProfileID
 	}
@@ -486,10 +514,21 @@ func judgeActionLabel(action string) string {
 
 // Match evaluates the rule list (priority DESC) against a tool call.
 // Returns (Decision, true) for the first matching enabled rule, or
-// (Decision{}, false) if no rule matches.
+// (Decision{}, false) if no rule matches. Fail-closed: a rule-load error is NOT
+// treated as "no rules" — it returns an explicit deny decision (and logs),
+// while an empty rule list (len==0, no error) still falls through to the LLM
+// judge / caller default.
 func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	rules, err := i.rules()
-	if err != nil || len(rules) == 0 {
+	if err != nil {
+		log.Printf("[intercept] 规则加载失败,工具 %s 按 fail-closed 拒绝: %v", toolName, err)
+		return Decision{
+			RuleName: "rule-load-error",
+			Action:   "deny",
+			Message:  "拦截规则加载失败,平台按 fail-closed 策略禁止执行此工具",
+		}, true
+	}
+	if len(rules) == 0 {
 		return Decision{}, false
 	}
 	for _, r := range rules {
@@ -559,11 +598,22 @@ func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolN
 // (via /api/intercept/pending/{id}/decide) or the per-rule timeout elapses.
 // Returns true if the user approved.
 //
+// 一键放行(guard_auto_allow)启用中时不创建 pending 记录,直接批准并写历史
+// (decision_source = "auto_allow");到期后自动恢复人工审批。
+//
 // convID == 0 means no active conversation (background pentest task). The
 // pending record is still created (conversation_id = NULL) so the approvals
 // page shows it and the sidebar badge lights up. The worker thread blocks just
 // like in a chat session — the user must visit the approvals page to unblock it.
 func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) bool {
+	// 一键放行(带时限):启用中直接放行,不进 pending;历史记 decision_source=
+	// "auto_allow"。每次裁决前 AutoAllowStatus 做惰性到期检查,过期自动关闭。
+	// 仅作用于 ask 审批;deny 规则在 guard 的 deny 分支拦截,不经过这里。
+	if i.AutoAllowStatus().Enabled {
+		i.autoAllowApprove(ctx, convID, dec, toolName, input)
+		return true
+	}
+
 	ruleID := dec.RuleID
 	taskID, agentName := taskInfoFromCtx(ctx)
 	taskEmit := taskEmitFromCtx(ctx)

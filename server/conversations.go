@@ -403,6 +403,10 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 		writeErr(w, 400, "消息不能为空")
 		return
 	}
+	agentMessage, ok := s.prepareChatMentionMessage(w, msg)
+	if !ok {
+		return
+	}
 	// Same resolution as the background runner: honour the agent binding / this
 	// conversation's chosen profile before falling back to the global config, so a
 	// conversation that picked a valid LLM is not rejected just because no global
@@ -450,7 +454,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
 	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
-	s.runConversation(c, composeAgentMessage(msg, req.Attachments, baseDir), busyKey)
+	s.runConversation(c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey, msg)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 
@@ -458,8 +462,13 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 // (each conversation is independent → parallel). Steps stream to
 // conversation_activities. Shared by the chat HTTP handler and the P3 scheduler.
 // busyKey clears when the run ends (best-effort in-flight marker).
-func (s *Server) runConversation(c *db.Conversation, msg, busyKey string) {
+func (s *Server) runConversation(c *db.Conversation, msg, busyKey string, userMessage ...string) {
 	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
+	// Only the human-message handler supplies this field, before adding the
+	// attachment manifest. Scheduler/retest prompts must not be labelled as users.
+	if len(userMessage) == 1 {
+		ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: userMessage[0]})
+	}
 	go s.runConversationTurn(ctx, cancel, c, msg, busyKey)
 }
 
@@ -518,6 +527,37 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 				return
 			}
 			started, err := s.m.pg.StartFindingRetest(ctx, r.ID)
+			if err != nil {
+				finishReason = err.Error()
+				return
+			}
+			if !started {
+				return
+			}
+		}
+	}
+	// Same first-turn sealing for verifier checks (finding_checks pipeline).
+	if c.AgentKey == db.FindingVerifierAgentKey {
+		finishStatus, finishReason = "failed", "验证未能启动"
+		chk, err := s.m.pg.FindingCheckForConversation(context.Background(), c.ID)
+		if err != nil {
+			log.Printf("[conv %d] load check: %v", c.ID, err)
+			if err := s.m.pg.FailPendingCheckForConversation(c.ID, "验证状态读取失败，请重新发起"); err != nil {
+				log.Printf("[conv %d] seal check: %v", c.ID, err)
+			}
+			return
+		}
+		if chk != nil && chk.Status == "pending" {
+			defer func() {
+				if ctx.Err() != nil {
+					finishStatus, finishReason = "stopped", "验证已停止或服务已关闭"
+				}
+				s.finishCheck(chk.ID, finishStatus, finishReason)
+			}()
+			if ctx.Err() != nil {
+				return
+			}
+			started, err := s.m.pg.StartFindingCheck(ctx, chk.ID)
 			if err != nil {
 				finishReason = err.Error()
 				return

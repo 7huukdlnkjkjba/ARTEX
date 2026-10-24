@@ -20,7 +20,9 @@ import { api } from "@/lib/api";
 import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { Activity } from "@/lib/types";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { ApprovalDetail } from "@/components/approval-records";
+import type { Activity, InterceptPending } from "@/lib/types";
 
 // ---- per-agent lane color (planner + work#1/#2/#3 …) ---------------------------
 const workerColors = [
@@ -203,6 +205,10 @@ function InterceptCard({
   const [detail, setDetail] = React.useState<Record<string, unknown> | null>(null);
   const [decided, setDecided] = React.useState<"allowed" | "denied" | "timeout" | null>(null);
   const [deciding, setDeciding] = React.useState(false);
+  const [expanded, setExpanded] = React.useState(false);
+  const [pending, setPending] = React.useState<InterceptPending | null>(null);
+  const [statusError, setStatusError] = React.useState("");
+  const [retry, setRetry] = React.useState(0);
 
   // Load persisted detail JSON + check the real current status from the backend
   // so that a page refresh shows the already-decided state instead of re-offering buttons.
@@ -217,17 +223,20 @@ function InterceptCard({
     return () => { live = false; };
   }, [step.seq, getDetail]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Retry explicitly reloads the same approval after a failed request.
   React.useEffect(() => {
     if (!pendingId) return;
     let live = true;
     api.interceptGetOne(pendingId)
       .then((p) => {
         if (!live) return;
+        setPending(p);
+        setStatusError("");
         if (p.status !== "pending") setDecided(p.status as "allowed" | "denied" | "timeout");
       })
-      .catch(() => {/* ignore */});
+      .catch((error) => { if (live) setStatusError((error as Error).message || "审批详情加载失败"); });
     return () => { live = false; };
-  }, [pendingId]);
+  }, [pendingId, retry]);
 
   async function decide(decision: "allowed" | "denied") {
     if (step.inherited || !pendingId || deciding) return;
@@ -247,9 +256,11 @@ function InterceptCard({
     ? JSON.stringify(detail.input).slice(0, 200)
     : null;
 
+  const row = pending ? { ...pending, status: decided || pending.status, conv_title: "", conv_agent_key: "", rule_name: "" } : null;
+
   return (
     <div className="my-2 rounded-lg border border-amber-400/50 bg-amber-50/40 dark:bg-amber-950/15 p-3 text-xs">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-start gap-2 min-w-0">
           <ShieldAlertIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
           <div className="min-w-0 space-y-0.5">
@@ -305,6 +316,34 @@ function InterceptCard({
           </div>
         )}
       </div>
+      {pendingId ? (
+        <Collapsible open={expanded} onOpenChange={setExpanded} className="mt-2 min-w-0">
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" aria-label={expanded ? "收起审批详情" : "展开审批详情"}>
+              {expanded ? <ChevronDown data-icon="inline-start" /> : <ChevronRight data-icon="inline-start" />}
+              {expanded ? "收起审批详情" : "展开审批详情"}
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            {expanded && row ? (
+              <ApprovalDetail
+                row={row}
+                busy={deciding}
+                decide={(_id, decision) => decide(decision)}
+                revision={retry}
+                readOnly={Boolean(step.inherited)}
+                defaultExpanded
+                onResolved={setDecided}
+              />
+            ) : statusError ? (
+              <div className="flex flex-wrap items-center gap-2 p-3" role="alert">
+                <span>{statusError}</span>
+                <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>重试详情</Button>
+              </div>
+            ) : <p className="p-3 text-muted-foreground">正在加载审批详情…</p>}
+          </CollapsibleContent>
+        </Collapsible>
+      ) : null}
     </div>
   );
 }
@@ -316,12 +355,15 @@ function ToolBlock({
   group,
   getDetail,
   showWorker,
+  focused = false,
 }: {
   group: Extract<Group, { type: "tool" }>;
   getDetail: (seq: number) => Promise<string>;
   showWorker?: boolean;
+  focused?: boolean;
 }) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(focused);
+  const targetRef = React.useRef<HTMLElement>(null);
   const [detail, setDetail] = React.useState<string | null>(null);
   // what we last loaded, keyed by the underlying step seqs. When the tool result
   // arrives after we expanded mid-run (command only), this key changes and the
@@ -338,7 +380,7 @@ function ToolBlock({
       ? "text-emerald-600 dark:text-emerald-400"
       : "text-red-600 dark:text-red-400";
   const rawCmd =
-    use && use.summary.startsWith(toolName) ? use.summary.slice(toolName.length).trimStart() : use?.summary ?? "";
+    use && use.summary.startsWith(toolName) ? use.summary.slice(toolName.length).trimStart() : (use?.summary ?? "");
   const cmd = toolInputText(toolName, rawCmd);
   // status only — the full result lives behind the expand (【输出】), not previewed inline
   const statusText = running ? "执行中…" : ok ? "✓" : "✕ 失败";
@@ -351,7 +393,7 @@ function ToolBlock({
     const segs: { label: string; seq: number }[] = [];
     if (use) segs.push({ label: "命令", seq: use.seq });
     if (result) segs.push({ label: "输出" + (result.is_error ? " ✕" : " ✓"), seq: result.seq });
-    Promise.all(
+    void Promise.all(
       segs.map((x) =>
         getDetail(x.seq)
           .then((d) => d || "（空）")
@@ -369,15 +411,56 @@ function ToolBlock({
     return () => {
       live = false;
     };
-  }, [open, detailKey, use, result, getDetail]);
+  }, [open, detailKey, use, result, getDetail, toolName]);
+
+  const scrolledRef = React.useRef(false);
+  React.useEffect(() => {
+    scrolledRef.current = false;
+    if (focused) setOpen(true);
+  }, [focused]);
+  React.useEffect(() => {
+    if (!focused || !open || detail === null || scrolledRef.current) return;
+    const el = targetRef.current;
+    const viewport = el?.closest('[data-slot="scroll-area-viewport"]');
+    if (!el || !viewport) return;
+    scrolledRef.current = true;
+    const center = () => {
+      const rect = el.getBoundingClientRect();
+      const bounds = viewport.getBoundingClientRect();
+      viewport.scrollTop += rect.top + rect.height / 2 - bounds.top - bounds.height / 2;
+    };
+    // User bubbles load their full text lazily. Allow their initial layout to
+    // settle, but stop anchoring immediately if the user interacts or after 2s.
+    const observer = new ResizeObserver(center);
+    observer.observe(el.parentElement ?? el);
+    observer.observe(viewport);
+    const stop = () => observer.disconnect();
+    viewport.addEventListener("wheel", stop, { passive: true, once: true });
+    viewport.addEventListener("touchstart", stop, { passive: true, once: true });
+    viewport.addEventListener("pointerdown", stop, { once: true });
+    const frame = requestAnimationFrame(center);
+    const timer = setTimeout(stop, 2000);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      stop();
+      viewport.removeEventListener("wheel", stop);
+      viewport.removeEventListener("touchstart", stop);
+      viewport.removeEventListener("pointerdown", stop);
+    };
+  }, [focused, open, detail]);
 
   function toggle() {
     setOpen((o) => !o);
   }
 
   return (
-    <div className="text-xs">
-      <button onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
+    <section
+      ref={targetRef}
+      aria-label={focused ? `定位的工具调用 #${use?.seq}` : undefined}
+      className={focused ? "rounded-lg border-2 border-primary bg-primary/5 p-3 text-xs" : "text-xs"}
+    >
+      <button type="button" onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
         <span className="mt-0.5 text-muted-foreground">
           {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         </span>
@@ -392,7 +475,7 @@ function ToolBlock({
           {detail ?? "加载中…"}
         </pre>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -423,7 +506,7 @@ function MessageBlock({
   React.useEffect(() => {
     if (!open || loadedKey.current === detailKey) return;
     let live = true;
-    Promise.all(
+    void Promise.all(
       group.steps.map((s) =>
         getDetail(s.seq)
           .then((d) => d || s.summary)
@@ -445,7 +528,7 @@ function MessageBlock({
 
   return (
     <div className="text-xs">
-      <button onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
+      <button type="button" onClick={toggle} className="flex w-full items-start gap-2 py-1 text-left hover:bg-muted/40">
         <span className="mt-0.5 text-muted-foreground">
           {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         </span>
@@ -519,14 +602,14 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
   }, [inView, step.seq, getDetail, step.summary, inline]);
   const { text, attachments } = parseUserBody(full ?? step.summary);
   return (
-    <div ref={ref} className="mt-3 mb-2 flex justify-end gap-2">
-      <div className="flex max-w-[85%] flex-col items-end gap-1.5">
+    <div ref={ref} className="mt-3 mb-2 flex min-w-0 justify-end gap-2">
+      <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1.5">
         {attachments.length > 0 && (
-          <div className="flex flex-wrap justify-end gap-1.5">
+          <div className="flex min-w-0 max-w-full flex-wrap justify-end gap-1.5">
             {attachments.map((a) => (
               <div
                 key={a.path}
-                className="flex items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs shadow-sm"
+                className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs shadow-sm"
                 title={a.path}
               >
                 <PaperclipIcon className="size-3 shrink-0 text-primary" />
@@ -537,7 +620,7 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
           </div>
         )}
         {text && (
-          <div className="whitespace-pre-wrap break-words rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground">
+          <div className="min-w-0 max-w-full whitespace-pre-wrap rounded-lg rounded-tr-sm bg-primary px-3 py-1.5 text-sm text-primary-foreground [overflow-wrap:anywhere]">
             {text}
           </div>
         )}
@@ -598,18 +681,19 @@ function ExecView({
   taskId,
   chat,
   fetchDetail,
+  focusedSeq,
 }: {
   activity: Activity[];
   taskId?: string;
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
+  focusedSeq?: number;
 }) {
   const showWorker = new Set(activity.map((a) => a.worker)).size > 1;
   // default detail fetcher: the task-scoped activity endpoint. The chat page passes
   // its own (conversation-scoped) fetcher instead.
   const getDetail = React.useCallback(
-    (seq: number) =>
-      fetchDetail ? fetchDetail(seq) : api.activityDetail(seq, taskId).then((r) => r.detail ?? ""),
+    (seq: number) => (fetchDetail ? fetchDetail(seq) : api.activityDetail(seq, taskId).then((r) => r.detail ?? "")),
     [fetchDetail, taskId],
   );
   return (
@@ -626,7 +710,13 @@ function ExecView({
         ) : g.type === "answer" ? (
           <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
         ) : g.type === "tool" ? (
-          <ToolBlock key={"t" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
+          <ToolBlock
+            key={"t" + g.key}
+            group={g}
+            getDetail={getDetail}
+            showWorker={showWorker}
+            focused={focusedSeq != null && g.use?.seq === focusedSeq}
+          />
         ) : g.type === "intercept" ? (
           <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
         ) : (
@@ -646,16 +736,30 @@ export function Transcript({
   taskId,
   chat,
   fetchDetail,
+  focusedSeq,
 }: {
   activity: Activity[];
   live?: boolean;
   taskId?: string;
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
+  focusedSeq?: number;
 }) {
+  const transcriptRef = React.useRef<HTMLDivElement>(null);
+  const [focusPadding, setFocusPadding] = React.useState(0);
+  React.useLayoutEffect(() => {
+    if (focusedSeq == null) { setFocusPadding(0); return; }
+    const viewport = transcriptRef.current?.closest('[data-slot="scroll-area-viewport"]');
+    if (!viewport) return;
+    const measure = () => setFocusPadding(viewport.clientHeight / 2);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [focusedSeq]);
   return (
-    <div className="flex flex-col gap-1">
-      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} />
+    <div ref={transcriptRef} className="flex flex-col gap-1" style={focusPadding ? { paddingBlock: focusPadding } : undefined}>
+      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} focusedSeq={focusedSeq} />
       {live && (
         <div className="flex items-center gap-2 pl-2 pt-1 text-xs text-muted-foreground">
           <span className="flex gap-1">

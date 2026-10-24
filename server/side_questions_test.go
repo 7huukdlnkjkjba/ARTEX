@@ -154,7 +154,7 @@ func newSideHTTPFixture(t *testing.T) *sideHTTPFixture {
 	s.llmOn = true
 	s.llmDirect = bindSideProvider(p, cfg, 0, "fixture")
 	s.cfgMu.Unlock()
-	token, err := signJWT(s.jwtKey)
+	token, err := signJWT(s.jwtKey, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,6 +267,9 @@ func TestSideHTTPBusyIsolationClearAndReconnect(t *testing.T) {
 			}
 		}
 		resp.Body.Close()
+		if err := scanner.Err(); err != nil {
+			t.Fatal(err)
+		}
 		if !seen {
 			t.Fatal("reconnect did not return cumulative request")
 		}
@@ -341,7 +344,7 @@ func TestSideHTTPGlobalLimitTaskWorkerAndDeletion(t *testing.T) {
 		waitSide(t, f.m.pg, e.ID, "completed")
 	}
 	f.call(t, "GET", fmt.Sprintf("/api/tasks/%s/intents/%d/side-questions", task.ID, iid+1000000), nil, 404)
-	if _, err := f.s.applyIntentControl(t.Context(), task, iid, "cancel", "cleanup"); err != nil {
+	if _, err := f.s.applyIntentControl(t.Context(), task, iid, "cancel", "cleanup", ""); err != nil {
 		t.Fatal(err)
 	}
 	if snap, err := f.m.pg.SideSnapshot(t.Context(), (sidequestion.Parent{TaskID: id, ExplorationID: task.ExpID, IntentID: iid}).Key()); err != nil || snap != nil {

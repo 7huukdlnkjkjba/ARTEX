@@ -27,6 +27,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
+import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { Transcript } from "@/components/transcript";
@@ -42,7 +44,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
+import { InputGroup, InputGroupAddon, InputGroupButton } from "@/components/ui/input-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
@@ -179,6 +181,8 @@ function statusIcon(status: SessionStatus) {
       return <CircleXIcon className="size-3.5 text-red-500" />;
     case "exhausted": // 步数耗尽(撞 max_turns)
       return <ZapOffIcon className="size-3.5 text-violet-500" />;
+    case "deleted": // 用户假删除
+      return <CircleSlashIcon className="size-3.5 text-muted-foreground" />;
   }
 }
 
@@ -307,6 +311,8 @@ function intentStatus(state: string): SessionStatus {
       return "paused";
     case "open": // 待领取，区别于执行中
       return "pending";
+    case "deleted": // 用户假删除
+      return "deleted";
     default: // running
       return "running";
   }
@@ -360,7 +366,11 @@ function SessionItem({
   ) : null;
 
   const cancellable =
-    s.role === "worker" && !s.inherited && !deleted && (s.status === "running" || s.status === "paused");
+    s.role === "worker" &&
+    !s.inherited &&
+    !deleted &&
+    // pending = 待领(open)意图;连同运行中/已暂停都允许删除。
+    (s.status === "running" || s.status === "paused" || s.status === "pending");
   return (
     <div
       className={cn(
@@ -415,8 +425,8 @@ function SessionItem({
             size="icon-xs"
             onClick={onCancel}
             disabled={controlling}
-            title="删除该意图（需填写原因，保留数据）"
-            aria-label="删除该意图（需填写原因，保留数据）"
+            title="删除该意图（需填写原因，可选假删除/真删除）"
+            aria-label="删除该意图（需填写原因，可选假删除/真删除）"
             className="text-destructive hover:text-destructive"
           >
             <Trash2Icon />
@@ -469,7 +479,37 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
 }
 
 export function SessionsTab({ taskId }: { taskId: string }) {
-  const [activeId, setActiveId] = React.useState(MAIN_ID);
+  const approvalFocus = useApprovalFocus({ taskId });
+  const [selectedSessionId, setActiveId] = React.useState(MAIN_ID);
+  const focusSession = React.useMemo<Session | undefined>(() => {
+    const source = approvalFocus.state?.source;
+    if (!source) return undefined;
+    if (source.session.startsWith("main:")) {
+      const seg = Number(source.session.slice(5));
+      return { ...MAIN_SESSION, id: mainSessionId(seg), seg, title: mainSessionTitle(seg), live: false };
+    }
+    if (source.session === "plan") return { ...PLANNER_SESSION, live: false };
+    if (source.session.startsWith("intent:")) {
+      const id = source.session.slice(7);
+      return {
+        id,
+        role: "worker",
+        intent_id: id,
+        title: `Worker #${id}`,
+        status: "done",
+        live: false,
+        last_activity: source.items[0]?.ts ?? "",
+      };
+    }
+    return undefined;
+  }, [approvalFocus.state?.source]);
+  // Keep a located archived/older session selectable after leaving focus mode.
+  const [locatedSession, setLocatedSession] = React.useState<{ taskId: string; session: Session }>();
+  React.useEffect(() => {
+    if (focusSession) setLocatedSession({ taskId, session: focusSession });
+  }, [taskId, focusSession]);
+  const retainedSession = locatedSession?.taskId === taskId ? locatedSession.session : undefined;
+  const activeId = focusSession?.id ?? selectedSessionId;
   // Main-agent conversation segments (newest-first); currentSeg is the writable one.
   const [mainSegs, setMainSegs] = React.useState<{ seq: number; created_at: string }[]>([{ seq: 0, created_at: "" }]);
   const [currentSeg, setCurrentSeg] = React.useState(0);
@@ -496,6 +536,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
   const [cancelIntent, setCancelIntent] = React.useState<Session | null>(null);
   const [cancelReason, setCancelReason] = React.useState("");
+  // 删除模式:soft=假删除(默认,置 deleted + 记原因,保留数据)| hard=真删除(级联移除独占子孙)。
+  const [deleteMode, setDeleteMode] = React.useState<"soft" | "hard">("soft");
   const [workerMessage, setWorkerMessage] = React.useState("");
   const [workerMessageRequestId, setWorkerMessageRequestId] = React.useState("");
   const [workerMessageSending, setWorkerMessageSending] = React.useState(false);
@@ -551,7 +593,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }, []);
 
   const controlWorker = React.useCallback(
-    async (session: Session, action: "pause" | "resume" | "cancel", reason?: string) => {
+    async (session: Session, action: "pause" | "resume" | "cancel", reason?: string, mode?: "soft" | "hard") => {
       if (!session.intent_id || session.inherited || controllingIntent) return;
       if (action === "cancel" && !reason?.trim()) {
         toast.error("请填写删除原因");
@@ -559,16 +601,23 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       }
       setControllingIntent(session.intent_id);
       try {
-        await api.controlIntent(taskId, session.intent_id, action, reason);
+        const res = await api.controlIntent(taskId, session.intent_id, action, reason, mode);
         if (action === "pause") {
           patchIntentState(session.intent_id, "paused");
           toast.success(`Worker #${session.intent_id} 已暂停`);
         } else if (action === "resume") {
           patchIntentState(session.intent_id, "open");
           toast.success(`Worker #${session.intent_id} 已恢复，等待重新领取`);
+        } else if (mode === "hard") {
+          // 真删除:意图及独占下游已物理移除,从列表剔除该行。
+          patchIntentState(session.intent_id);
+          const d = res.deleted;
+          const extra = d ? `（含 ${d.intents} 意图 / ${d.facts} 事实 / ${d.findings} 漏洞）` : "";
+          toast.success(`Worker #${session.intent_id} 及其独占下游已彻底删除${extra}`);
+          setCancelReason("");
         } else {
-          // 删除 = 停止意图并附原因（不销毁意图与产出）；保留会话，状态置为 stopped。
-          patchIntentState(session.intent_id, "stopped");
+          // 假删除:意图置 deleted、记录删除原因,保留节点与产出。
+          patchIntentState(session.intent_id, "deleted");
           toast.success(`Worker #${session.intent_id} 已删除（原因已记录，规划者将据此重新规划）`);
           setCancelReason("");
         }
@@ -887,6 +936,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const token = (reqTokenRef.current.mainboot ?? 0) + 1;
     reqTokenRef.current.mainboot = token;
     let bootKey = mainSessionKey(0);
+    // F6: SSE 凭据是 60s 一次性 ticket(见 api.ts sseUrl),EventSource 自带的
+    // 自动重连第二次握手必然 401——连接彻底关闭后重新换票重连;snapshot 游标
+    // 回放 + mergeBySeq 按 seq 去重补偿空窗,等价于原来的 Last-Event-ID 续传。
+    let sseRetry: ReturnType<typeof setTimeout> | undefined;
+    const openStreamRef = { current: null as null | (() => void) };
     // Resolve the main-agent segments first, then load the CURRENT segment's history and
     // open the SSE from its snapshot cursor. The SSE tails all segments and routes each
     // frame by session_key (main:<seg>), so switching segments needs no new stream.
@@ -920,69 +974,86 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           };
         });
         // Open the single task SSE from the snapshot cursor.
-        const es = new EventSource(
-          sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`),
-        );
-        esRef.current = es;
-        es.onopen = () => setSseLive(true);
-        es.onerror = () => setSseLive(false); // EventSource auto-reconnects; DB compensates the gap
-        es.onmessage = (e) => {
-          let a: Activity;
-          try {
-            a = JSON.parse(e.data) as Activity;
-          } catch {
-            return; // ignore malformed frame
-          }
-          if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
-            llmToastSeqRef.current.add(a.seq);
-            const transition = a.metadata?.llm_transition;
-            if (transition?.mode === "exhausted" || a.is_error) {
-              toast.error(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-            } else if (transition?.mode === "automatic") {
-              toast.success(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-            } else {
-              toast.info(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-            }
-            void api
-              .taskLLMResolution(taskId)
-              .then((value) => {
-                if (alive) setLLMResolutions(value);
-              })
-              .catch(() => {
-                // The periodic resolver poll will retry if this event-triggered refresh fails.
-              });
-          }
-          const k = sessionKeyOf(a);
-          setStore((prev) => {
-            const cur = prev[k] ?? emptyState();
-            const activeK = activeKeyRef.current;
-            // Merge into sessions that are loaded, actively loading, or the current
-            // view (so returning is instant + a frame that lands mid-load isn't lost).
-            // A cold, inactive session also keeps a tiny accounting tail so the
-            // sidebar can add the latest unfinished usage without loading history.
-            if (!cur.loaded && !cur.loading && k !== activeK) {
-              const accountingItems =
-                a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
-              return {
-                ...prev,
-                [k]: { ...cur, items: accountingItems, lastTs: a.ts, unread: cur.unread + 1 },
+        openStreamRef.current = () => {
+          void sseUrl(
+            `/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`,
+          )
+            .then((url) => {
+              if (!alive) return;
+              const es = new EventSource(url);
+              esRef.current = es;
+              es.onopen = () => setSseLive(true);
+              es.onerror = () => {
+                setSseLive(false);
+                // 一次性 ticket 不支持浏览器自动重连(重试即 401);彻底关闭后换票重连。
+                if (es.readyState === EventSource.CLOSED && alive && esRef.current === es) {
+                  esRef.current = null;
+                  sseRetry = setTimeout(() => openStreamRef.current?.(), 3000);
+                }
               };
-            }
-            let items = mergeBySeq(cur.items, [a]);
-            // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
-            // but never while the user is reading this session's history (scrolled up).
-            let hasMore = cur.hasMore;
-            let earliestSeq = cur.earliestSeq;
-            const trimmable = k !== activeK || atBottomRef.current;
-            if (trimmable && items.length > MAX_KEEP) {
-              items = items.slice(items.length - MAX_KEEP);
-              hasMore = true;
-              earliestSeq = items[0].seq;
-            }
-            const unread = k === activeK ? 0 : cur.unread + 1;
-            return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
-          });
+              es.onmessage = (e) => {
+                let a: Activity;
+                try {
+                  a = JSON.parse(e.data) as Activity;
+                } catch {
+                  return; // ignore malformed frame
+                }
+                if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
+                  llmToastSeqRef.current.add(a.seq);
+                  const transition = a.metadata?.llm_transition;
+                  if (transition?.mode === "exhausted" || a.is_error) {
+                    toast.error(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                  } else if (transition?.mode === "automatic") {
+                    toast.success(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                  } else {
+                    toast.info(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                  }
+                  void api
+                    .taskLLMResolution(taskId)
+                    .then((value) => {
+                      if (alive) setLLMResolutions(value);
+                    })
+                    .catch(() => {
+                      // The periodic resolver poll will retry if this event-triggered refresh fails.
+                    });
+                }
+                const k = sessionKeyOf(a);
+                setStore((prev) => {
+                  const cur = prev[k] ?? emptyState();
+                  const activeK = activeKeyRef.current;
+                  // Merge into sessions that are loaded, actively loading, or the current
+                  // view (so returning is instant + a frame that lands mid-load isn't lost).
+                  // A cold, inactive session also keeps a tiny accounting tail so the
+                  // sidebar can add the latest unfinished usage without loading history.
+                  if (!cur.loaded && !cur.loading && k !== activeK) {
+                    const accountingItems =
+                      a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
+                    return {
+                      ...prev,
+                      [k]: { ...cur, items: accountingItems, lastTs: a.ts, unread: cur.unread + 1 },
+                    };
+                  }
+                  let items = mergeBySeq(cur.items, [a]);
+                  // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
+                  // but never while the user is reading this session's history (scrolled up).
+                  let hasMore = cur.hasMore;
+                  let earliestSeq = cur.earliestSeq;
+                  const trimmable = k !== activeK || atBottomRef.current;
+                  if (trimmable && items.length > MAX_KEEP) {
+                    items = items.slice(items.length - MAX_KEEP);
+                    hasMore = true;
+                    earliestSeq = items[0].seq;
+                  }
+                  const unread = k === activeK ? 0 : cur.unread + 1;
+                  return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
+                });
+              };
+            })
+            .catch(() => {
+              if (alive) sseRetry = setTimeout(() => openStreamRef.current?.(), 3000);
+            });
         };
+        openStreamRef.current();
       })
       .catch((err) => {
         if (!alive || reqTokenRef.current.mainboot !== token) return;
@@ -993,6 +1064,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
 
     return () => {
       alive = false;
+      if (sseRetry) clearTimeout(sseRetry);
       esRef.current?.close();
       esRef.current = null;
     };
@@ -1107,17 +1179,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     for (const node of allIntents) {
       let title = `Intent ${node.id}`;
       let parsedPayload: unknown = node.payload;
-      let deleted = false;
-      let deleteReason = "";
+      // 假删除:意图 state='deleted',删除原因在独立字段 delete_reason 上。
+      const deleted = node.state === "deleted";
+      const deleteReason = node.delete_reason ?? "";
       if (node.payload) {
         try {
           const p = JSON.parse(node.payload);
           parsedPayload = p;
           if (p?.summary) title = String(p.summary);
-          if (p?.cancelled_by_user) {
-            deleted = true;
-            deleteReason = String(p.cancel_reason ?? "");
-          }
         } catch {
           title = node.payload.trim() || title;
         }
@@ -1198,10 +1267,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     [mainSegs, liveMainSeg],
   );
 
-  const sessions = React.useMemo(
-    () => [...mainSessions, { ...PLANNER_SESSION, live: plannerLive }, ...workerSessions, SYSTEM_SESSION],
-    [mainSessions, workerSessions, plannerLive],
-  );
+  const sessions = React.useMemo(() => {
+    const items = [...mainSessions, { ...PLANNER_SESSION, live: plannerLive }, ...workerSessions, SYSTEM_SESSION];
+    const located = focusSession ?? retainedSession;
+    if (located && !items.some((s) => s.id === located.id)) items.push(located);
+    return items;
+  }, [mainSessions, workerSessions, plannerLive, focusSession, retainedSession]);
 
   const grouped = {
     mainagent: sessions.filter((s) => s.role === "mainagent"),
@@ -1252,6 +1323,32 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       patchStore(activeKey, (s) => ({ ...s, unread: 0 }));
     }
   }, [activeKey]);
+
+  const focusKey = approvalFocus.state?.source?.session;
+  const loadFocusPage = React.useCallback(
+    (before: number) => api.activityHistory(taskId, focusKey ?? "main", before, PAGE),
+    [taskId, focusKey],
+  );
+  const mergeFocusPage = React.useCallback(
+    (page: { items: Activity[]; hasMore: boolean }) => {
+      if (!focusKey) return;
+      patchStore(focusKey, (s) => {
+        const items = mergeBySeq(page.items, s.items);
+        return { ...s, items, hasMore: page.hasMore, earliestSeq: items[0]?.seq ?? s.earliestSeq };
+      });
+    },
+    [focusKey, patchStore],
+  );
+  const focusHistory = useApprovalHistory(
+    approvalFocus.state?.source,
+    !!focusKey && !!store[focusKey]?.loaded,
+    focusKey ? (store[focusKey]?.items ?? []) : [],
+    loadFocusPage,
+    mergeFocusPage,
+  );
+  React.useEffect(() => {
+    if (approvalFocus.state) atBottomRef.current = false;
+  }, [approvalFocus.state]);
 
   // Main agent is the human↔orchestrator CONSOLE: only the conversation (user msgs +
   // the main agent's own replies/steps). Planner session shows planner steps; a
@@ -1367,28 +1464,29 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const vp = viewport();
     if (!vp) return;
     const onScroll = () => {
+      if (approvalFocus.state && !focusHistory.ready) return;
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
       if (vp.scrollTop <= 80) loadEarlier(activeKeyRef.current, viewport); // near top → older page
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
     return () => vp.removeEventListener("scroll", onScroll);
-  }, [viewport, activeId, loadEarlier]);
+  }, [viewport, activeId, loadEarlier, approvalFocus.state, focusHistory.ready]);
   // open/switch a session → jump to the latest (bottom)
   // biome-ignore lint/correctness/useExhaustiveDependencies: activeId intentionally scrolls a newly selected session.
   React.useLayoutEffect(() => {
     const vp = viewport();
-    if (vp) {
+    if (vp && !approvalFocus.state) {
       vp.scrollTop = vp.scrollHeight;
       atBottomRef.current = true;
     }
-  }, [activeId, viewport]);
+  }, [activeId, viewport, approvalFocus.state]);
   // new activity → stick to bottom only if the user is already pinned there
   // biome-ignore lint/correctness/useExhaustiveDependencies: activity growth intentionally drives live-edge scrolling.
   React.useLayoutEffect(() => {
-    if (!atBottomRef.current) return;
+    if (approvalFocus.state || !atBottomRef.current) return;
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [activity, viewport]);
+  }, [activity, viewport, approvalFocus.state]);
   // Lazy detail loads (AnswerBlock / ToolBlock / Markdown) grow the content AFTER the
   // activity array settles, WITHOUT changing its reference — so the layout effects
   // above never re-fire and a freshly opened session would leave its last message
@@ -1402,13 +1500,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const el = contentRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
-      if (!atBottomRef.current) return;
+      if (approvalFocus.state || !atBottomRef.current) return;
       const vp = viewport();
       if (vp) vp.scrollTop = vp.scrollHeight;
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [activeId, viewport]);
+  }, [activeId, viewport, approvalFocus.state]);
 
   function stop() {
     if (stopping) return;
@@ -1616,6 +1714,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                           hasPending={hasPendingForSession(s)}
                           unread={store[keyForSession(s)]?.unread}
                           onClick={() => {
+                            approvalFocus.close();
                             setActiveId(s.id);
                             setListOpen(false); // 手机端选完即收起，把高度还给会话记录
                             setWorkerMessage("");
@@ -1777,6 +1876,16 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 </div>
               );
             })()}
+            <ApprovalExecutionFocus
+              focus={{
+                ...approvalFocus,
+                close: () => {
+                  setActiveId(activeId);
+                  approvalFocus.close();
+                },
+              }}
+              history={focusHistory}
+            />
             {/* Force Radix's internal viewport wrapper (display:table, sizes to content)
             to block so wide/unbreakable steps (long commands, code, URLs) can't blow
             out the width and defeat the truncation below — the transcript wraps to
@@ -1808,7 +1917,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     </Button>
                   </div>
                 ) : activity.length ? (
-                  <Transcript activity={activity} live={active.live} taskId={taskId} chat={isMain} />
+                  <Transcript
+                    activity={activity}
+                    live={active.live}
+                    taskId={taskId}
+                    chat={isMain}
+                    focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
+                  />
                 ) : (
                   <div className="pl-9 text-xs text-muted-foreground">
                     {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
@@ -1849,12 +1964,16 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   onChange={(e) => void pickFiles(e.target.files)}
                 />
                 <InputGroup className="min-h-9 has-disabled:opacity-100">
-                  <InputGroupTextarea
+                  <MentionTextarea
+                    inputGroup
                     rows={1}
                     aria-label="给主 Agent 发消息"
-                    placeholder={mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，引导探索方向…"}
+                    placeholder={
+                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"
+                    }
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
+                    disabled={sending}
+                    onValueChange={setInput}
                     onKeyDown={(e) => {
                       if (!shouldSubmitOnKey(e, sendMode)) return;
                       e.preventDefault();
@@ -1911,13 +2030,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               (active.status === "running" || active.status === "paused") ? (
               <div className="border-t p-3">
                 <InputGroup className="min-h-9 has-disabled:opacity-100">
-                  <InputGroupTextarea
+                  <MentionTextarea
+                    inputGroup
                     rows={1}
                     aria-label={`给 Worker #${active.intent_id} 发消息`}
-                    placeholder={`给 Worker #${active.intent_id} 发消息，调整执行方向…`}
+                    placeholder={`给 Worker #${active.intent_id} 发消息，@ 引用记录，调整执行方向…`}
                     value={workerMessage}
-                    onChange={(event) => {
-                      setWorkerMessage(event.target.value);
+                    onValueChange={(value) => {
+                      setWorkerMessage(value);
                       setWorkerMessageRequestId("");
                     }}
                     onKeyDown={(event) => {
@@ -2011,6 +2131,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             if (!open) {
               setCancelIntent(null);
               setCancelReason("");
+              setDeleteMode("soft");
             }
           }}
         >
@@ -2018,33 +2139,68 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             <AlertDialogHeader>
               <AlertDialogTitle>删除 Worker #{cancelIntent?.intent_id}？</AlertDialogTitle>
               <AlertDialogDescription className="break-words whitespace-normal">
-                删除会<strong>停止该意图</strong>
-                （不再执行），并把删除原因作为一条事实挂到该意图上；意图、执行记录、已登记的事实和漏洞
-                <strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
+                {deleteMode === "hard" ? (
+                  <>
+                    <strong>真删除</strong>会物理移除该意图，以及<strong>仅由它支撑</strong>
+                    的下游节点（级联到叶子，避免留下孤立数据）；共享节点、目标和任务根事实会保留。
+                    <strong>此操作不可恢复。</strong>规划者会收到删除通知并据此重新规划。
+                  </>
+                ) : (
+                  <>
+                    <strong>假删除</strong>会把该意图置为「已删除」并记录删除原因，意图节点、执行记录、
+                    已登记的事实和漏洞<strong>都会保留</strong>。规划者会收到「该意图由用户删除 + 原因」并据此重新规划。
+                  </>
+                )}
               </AlertDialogDescription>
             </AlertDialogHeader>
-            <div className="grid gap-2 py-1">
-              <label htmlFor="cancel-reason" className="text-sm font-medium">
-                删除原因（必填）
-              </label>
-              <Textarea
-                id="cancel-reason"
-                value={cancelReason}
-                onChange={(e) => setCancelReason(e.target.value)}
-                placeholder="说明为什么删除这条意图，例如：方向判断错误 / 目标已失效 / 与其他意图重复…"
-                rows={3}
-                autoFocus
-              />
+            <div className="grid gap-3 py-1">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteMode("soft")}
+                  className={cn(
+                    "rounded-md border px-3 py-2 text-left text-sm transition-colors",
+                    deleteMode === "soft" ? "border-primary bg-primary/5" : "hover:bg-accent",
+                  )}
+                >
+                  <div className="font-medium">假删除</div>
+                  <div className="text-xs text-muted-foreground">保留数据，可追溯</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDeleteMode("hard")}
+                  className={cn(
+                    "rounded-md border px-3 py-2 text-left text-sm transition-colors",
+                    deleteMode === "hard" ? "border-destructive bg-destructive/5" : "hover:bg-accent",
+                  )}
+                >
+                  <div className="font-medium">真删除</div>
+                  <div className="text-xs text-muted-foreground">级联移除，不可恢复</div>
+                </button>
+              </div>
+              <div className="grid gap-2">
+                <label htmlFor="cancel-reason" className="text-sm font-medium">
+                  删除原因（必填）
+                </label>
+                <Textarea
+                  id="cancel-reason"
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  placeholder="说明为什么删除这条意图，例如：方向判断错误 / 目标已失效 / 与其他意图重复…"
+                  rows={3}
+                  autoFocus
+                />
+              </div>
             </div>
             <AlertDialogFooter>
               <AlertDialogCancel>返回</AlertDialogCancel>
               <AlertDialogAction
                 variant="destructive"
                 disabled={!cancelIntent || controllingIntent !== null || !cancelReason.trim()}
-                onClick={() => cancelIntent && void controlWorker(cancelIntent, "cancel", cancelReason)}
+                onClick={() => cancelIntent && void controlWorker(cancelIntent, "cancel", cancelReason, deleteMode)}
               >
                 {controllingIntent ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
-                确认删除
+                {deleteMode === "hard" ? "彻底删除" : "确认删除"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

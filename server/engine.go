@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/agent/chainskel"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/harness"
@@ -96,9 +97,6 @@ type Engine struct {
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
-	mu       sync.RWMutex
-	planner  *agent.Planner
-	worker   *agent.Worker
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
 	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
 	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
@@ -139,6 +137,10 @@ type Engine struct {
 
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
 
+	// P0 意图领取超时上报(红日 3 R2:决胜意图 #207 从未被领取)的冷却台账:
+	// taskID -> *sync.Map(intentID -> bool),同一意图只上报一次。见 intent_watchdog.go。
+	p0Reported sync.Map
+
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
 	settling     sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
 	deadline     sync.Map // taskID -> int64 unix, 绝对截止时刻(首次运行时盖章;0/缺省=不限)
@@ -146,11 +148,14 @@ type Engine struct {
 	inflight     sync.Map // taskID -> *int64, 在跑的 planner.Plan + worker.Execute 计数(用于 drain)
 	coordStarted sync.Map // taskID -> bool, deadline 协调器是否已启动(Run/reload 去重)
 
-	// resolve, if set, returns a task's dedicated planner/worker. In legacy mode
-	// nil,nil falls back to the global pair; an authoritative resolver uses nil,nil
-	// to mean this task is deliberately unavailable (for example an exhausted chain).
+	// resolve returns a task's dedicated planner/worker (wired by the server as the
+	// authoritative task-router). nil,nil means this task is deliberately unavailable
+	// (for example an exhausted failover chain) — there is no global-pair fallback.
 	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
 	resolveAuthoritative bool
+	// readiness reports whether a global LLM provider is configured — the signal behind
+	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
+	readiness func() bool
 }
 
 type taskRuntime struct {
@@ -280,6 +285,7 @@ func (e *Engine) StopTask(taskID string) {
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
 	e.plannerRound.Delete(taskID)
+	e.p0Reported.Delete(taskID)
 	e.settling.Delete(taskID)
 	e.deadline.Delete(taskID)
 	e.stamped.Delete(taskID)
@@ -288,6 +294,13 @@ func (e *Engine) StopTask(taskID string) {
 	e.deleteMu.Lock()
 	e.deleting.Delete(taskID)
 	e.deleteMu.Unlock()
+
+	// 期 3b:任务删除/归档连带销毁其 MITM 实例(端口注销;CA/录制树保留)。
+	if e.m != nil {
+		if id, err := strconv.ParseInt(taskID, 10, 64); err == nil {
+			e.m.CloseTaskProxy(id)
+		}
+	}
 }
 
 // cancelExec cancels a task's current per-task exec context (any in-flight
@@ -527,7 +540,8 @@ func (e *Engine) drainSteer(intentID int64) (string, bool) {
 // before each tool call it drains a queued course-correction (if any) and blocks the
 // call, handing the message back to the model — which re-plans its next step instead
 // of running the tool. No queued message → the guard behaves exactly as before.
-// 它同时负责「空转回合」的续跑，见 Stop。
+// 它同时负责「空转回合」的续跑(见 Stop)与「同质响应停滞检测」(见 PostToolUse,
+// chains L1,CHAINS-INTEGRATION-DESIGN.md §3)。
 type steerHooks struct {
 	inner harness.HookRunner
 	drain func() (string, bool)
@@ -539,6 +553,14 @@ type steerHooks struct {
 	limit int
 	// label 形如 "worker-1 · #42"，只用于日志。
 	label string
+	// det 是同响应停滞检测器(chains L1,POSTMORTEM-RED-SUN-3.md R4):PostToolUse
+	// 喂入每步 tool_result,判定"信息梯度为零"后经 PreToolUse drain 注入转向指令。
+	// 指针,与 nudges 同理——且有意建在 model_error 重跑循环外(见 runIntent),一条
+	// 意图的触发额度(冷却/上限)跨重跑共享,重跑一轮不清零。nil = 关闭。
+	det *agent.StuckDetector
+	// onStuck 在检测器触发时回调(engine 接线:写 system activity + hint 挂探索图,
+	// 让 planner 感知)。nil = 只注入、不留痕。
+	onStuck func(ev *agent.StuckEvent)
 }
 
 // 空转回合(只有思考、既无正文也无工具调用)续跑次数的默认值，与 SDK 空响应重试的
@@ -580,6 +602,13 @@ func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (
 		return true, "【规划者实时纠偏】" + msg +
 			"\n（这是规划者对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）", nil
 	}
+	// 停滞检测的干预消息排在规划者纠偏之后:都是"先别动手、听完再说",规划者的
+	// 指令优先级更高。消息自带完整上下文(签名/次数/未执行说明),无需再加前缀。
+	if h.det != nil {
+		if msg, ok := h.det.Drain(); ok {
+			return true, msg, nil
+		}
+	}
 	if h.inner != nil {
 		return h.inner.PreToolUse(ctx, name, input)
 	}
@@ -587,6 +616,16 @@ func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (
 }
 
 func (h steerHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
+	// chains L1:每步 tool_result 先喂停滞检测器(纯函数,~0 成本);触发时注入消息
+	// 已由检测器排入 pending(下一次 PreToolUse drain),这里只负责留痕回调。
+	if h.det != nil {
+		if ev := h.det.Observe(name, string(result), isErr); ev != nil {
+			log.Printf("[work %s] 停滞检测触发(%s,连续 %d 次,签名 %s,第 %d 次)", h.label, ev.Kind, ev.Count, ev.Signature, ev.N)
+			if h.onStuck != nil {
+				h.onStuck(ev)
+			}
+		}
+	}
 	if h.inner != nil {
 		h.inner.PostToolUse(ctx, name, input, result, isErr)
 	}
@@ -622,13 +661,20 @@ func (h steerHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []s
 // KillWork cancels the in-flight work running intentID (planner's kill_work tool).
 // The work's agent-core session honors ctx cancellation and aborts promptly.
 func (e *Engine) KillWork(intentID int64) error {
+	return e.KillWorkAs(intentID, agent.AbortKilledByPlanner)
+}
+
+// KillWorkAs is KillWork with an explicit named cause, so the activity trace can
+// tell WHO terminated the work (planner vs main agent — cancelcause.go 的具名取消
+// 规范要求每个取消点都登记原因).
+func (e *Engine) KillWorkAs(intentID int64, cause *agent.AbortCause) error {
 	e.workMu.Lock()
 	run := e.work[intentID]
 	e.workMu.Unlock()
 	if run == nil {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
 	}
-	run.cancel(agent.AbortKilledByPlanner)
+	run.cancel(cause)
 	return nil
 }
 
@@ -696,18 +742,9 @@ func (e *Engine) appendActivity(t *Task, r db.Activity) (int64, error) {
 	return 0, err
 }
 
-// UseLLM installs (or replaces) the LLM planner + work agent at runtime.
-func (e *Engine) UseLLM(p *agent.Planner, w *agent.Worker) {
-	e.mu.Lock()
-	e.planner, e.worker = p, w
-	e.mu.Unlock()
-}
-
-func (e *Engine) snapshot() (*agent.Planner, *agent.Worker) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.planner, e.worker
-}
+// SetReadiness wires the global "an LLM provider is configured" predicate (read by
+// Ready() / the llm_configured indicator). Called once at startup.
+func (e *Engine) SetReadiness(fn func() bool) { e.readiness = fn }
 
 // SetAgentResolver installs a per-task planner/worker resolver (wired by the server).
 // Called once at startup before any task loop runs, so no lock is needed on reads.
@@ -724,9 +761,9 @@ func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner,
 	e.resolveAuthoritative = true
 }
 
-// snapshotFor returns the planner/worker a task should run on: the task's dedicated
-// pair when it pins a specific LLM profile (via the resolver), else the global active
-// pair. The resolver returning nil means "no override" (fall back to global).
+// snapshotFor returns the planner/worker a task should run on, from the task-router
+// resolver. nil,nil means the task is deliberately unavailable (e.g. an exhausted
+// failover chain); there is no global-pair fallback.
 func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
 	if e.resolve != nil {
 		p, w := e.resolve(t)
@@ -734,13 +771,13 @@ func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
 			return p, w
 		}
 	}
-	return e.snapshot()
+	return nil, nil
 }
 
-// Ready reports whether an LLM provider is configured.
+// Ready reports whether a global LLM provider is configured (via the readiness
+// predicate wired at startup).
 func (e *Engine) Ready() bool {
-	p, w := e.snapshot()
-	return p != nil && w != nil
+	return e.readiness != nil && e.readiness()
 }
 
 // ReadyFor reports whether a specific task can resolve a planner/worker pair.
@@ -749,14 +786,6 @@ func (e *Engine) Ready() bool {
 func (e *Engine) ReadyFor(t *Task) bool {
 	p, w := e.snapshotFor(t)
 	return p != nil && w != nil
-}
-
-// Mode reports "llm" when ready, else "idle".
-func (e *Engine) Mode() string {
-	if e.Ready() {
-		return "llm"
-	}
-	return "idle"
 }
 
 // Run starts the planner loop + N worker loops for a task. The loops always run
@@ -915,10 +944,19 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		e.touch(t.ID)
 	}
 
+	// P0 意图领取超时巡检:独立于规划心跳(心跳间隔 ≥10min,而 P0 超时是 5min,
+	// 且全部 worker 忙碌时 worker 循环都在 runIntent 里,没人会发现 frontier 里的
+	// P0 积压)。纯 db 读 + 一次性 hint 写入,不触发 LLM 调用。见 intent_watchdog.go。
+	watchdog := time.NewTicker(p0WatchInterval)
+	defer watchdog.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-watchdog.C:
+			e.reportOverdueP0Intents(t)
+			continue // 巡检不是规划触发,不重臂规划心跳
 		case <-t.notify:
 			runRound("edge") // worker 结束 / finding / kill / resume / seed 首轮
 		case <-heartbeat.C:
@@ -1029,6 +1067,30 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		nudges: &atomic.Int64{},
 		limit:  e.emptyTurnNudgeLimit(),
 		label:  label,
+	}
+	// chains L1 停滞检测器同理:建在重跑循环外,冷却/触发上限按「这条意图」计,
+	// 跨 model_error 重跑共享(见 steerHooks.det 注释)。触发时除注入转向指令外,
+	// 留两道痕供 planner 感知:
+	//  1) system activity —— 进 worker trace,planner 用 get_worker_output 能看到;
+	//  2) hint 节点挂探索图 —— TriggerEvent 没有 system 类事件(manager.go 的
+	//     pendingTriggers 只有 done/finding/goal*/cancelled),而 planner 每轮
+	//     graph overview 必读 hints(agent/tools.go graphOverviewData),这是
+	//     现有结构里检测信号进 planner 视野的既有通道(参照 add_hint 路径)。
+	hooks.det = agent.NewStuckDetector(agent.DefaultStuckConfig())
+	// chains L3 → L1:停滞触发时附上类别化转向建议(按意图 chain_tags 从对应类
+	// 骨架抽"转向"条目,无匹配则为空、维持通用措辞)。一次性算好,整条意图不变。
+	hooks.det.PivotHint = chainskel.PivotHintsForIntent(intent.Payload, 3)
+	hooks.onStuck = func(ev *agent.StuckEvent) {
+		taskEmit(db.Activity{Kind: "system", Tool: ev.Tool,
+			Summary: fmt.Sprintf("停滞检测:连续 %d 次同质响应(%s,签名 %s)", ev.Count, ev.Kind, ev.Signature),
+			Detail:  agent.StuckIntervention(*ev)})
+		if t.Store != nil {
+			if _, err := t.Store.AddNode(db.KindHint, map[string]any{"text": fmt.Sprintf(
+				"【停滞检测】意图 #%d 的 worker 连续 %d 次同质/相似失败响应(签名 %s,工具 %s),信息梯度为零,平台已注入转向指令(第 %d 次)。规划时请避开同轴方向(换参数/信道/漏洞类/入口),或确认该方向已榨干再收尾。",
+				iid, ev.Count, ev.Signature, ev.Tool, ev.N)}, 0, "active", "system", nil); err != nil {
+				log.Printf("[work %s] 停滞检测 hint 写图失败: %v", label, err)
+			}
+		}
 	}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	e.BeginLLMCall(t.ID)
@@ -1185,7 +1247,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // server root, never the HTTP request, so a disconnect cannot strand the run while
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
-func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message string) error {
+func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
 	if !e.beginTaskOperation(t.ID) {
 		return fmt.Errorf("task is being deleted")
 	}
@@ -1216,14 +1278,14 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 	node.State, node.Owner = "running", "chat"
 	// Record the human turn as a visible activity BEFORE the run starts, so it is
 	// ordered ahead of any worker step and never appears without the run happening.
-	// This is the UI copy; ExecuteWithMessage separately writes it into the intent
-	// transcript as the LLM input.
+	// Keep the UI copy concise; ExecuteWithMessage writes the server-resolved
+	// reference snapshot into the intent transcript as the LLM input.
 	uid := intentID
 	e.emitActivity(t, db.Activity{NodeID: &uid, Worker: "user", Kind: "user", Summary: message, Detail: message})
 	release = false // ownership of the admission passes to the goroutine
 	go func() {
 		defer e.decInflight(t.ID)
-		e.runIntent(ctx, t, "chat", worker, node, requestID, message)
+		e.runIntent(ctx, t, "chat", worker, node, requestID, agentMessage)
 	}()
 	return nil
 }

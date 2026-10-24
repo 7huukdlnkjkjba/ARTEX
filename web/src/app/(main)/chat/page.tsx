@@ -22,8 +22,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
+import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { Transcript } from "@/components/transcript";
 import {
   AlertDialog,
@@ -50,7 +52,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { Textarea } from "@/components/ui/textarea";
 import { useSideQuestions } from "@/hooks/use-side-questions";
 import { mergeActivities } from "@/lib/activity-merge";
 import { api } from "@/lib/api";
@@ -170,7 +171,7 @@ function Composer({
   stopDisabled?: boolean;
   // 方式1 文件上传:传了 onPickFiles 才显示回形针按钮 + 附件 chip 预览。
   attachments?: ChatAttachment[];
-  onPickFiles?: (files: FileList | null) => void;
+  onPickFiles?: (files: File[]) => void;
   onRemoveAttachment?: (path: string) => void;
   uploading?: boolean;
   allowBtw?: boolean;
@@ -221,8 +222,11 @@ function Composer({
               multiple
               className="hidden"
               onChange={(e) => {
-                onPickFiles(e.target.files);
+                // FileList 与 input 元素活绑定:必须先快照成数组,再清空 value,
+                // 否则异步的 onPickFiles(比如草稿态要先建会话)恢复执行时会拿到空列表。
+                const picked = Array.from(e.target.files ?? []);
                 e.target.value = ""; // allow re-picking the same file
+                if (picked.length > 0) onPickFiles(picked);
               }}
             />
             <Button
@@ -236,13 +240,13 @@ function Composer({
             </Button>
           </>
         )}
-        <Textarea
+        <MentionTextarea
           className="max-h-40 min-h-10 min-w-0 flex-1 resize-none"
           rows={1}
           placeholder={placeholder}
           value={value}
-          disabled={disabled && !allowBtw}
-          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled && !(running && allowBtw)}
+          onValueChange={onChange}
           onKeyDown={onKeyDown}
         />
         {running && allowBtw && isBtwCommand(value) && (
@@ -401,12 +405,12 @@ function DraftChat({
   // into it, then hands off to ChatView carrying the typed text + attachments (the
   // user sends from there). Mirrors the task main-agent console's upload, adapted to
   // the ChatGPT-style lazy-create flow.
-  async function pickFiles(files: FileList | null) {
-    if (!files || files.length === 0 || !agentKey || uploading || sending) return;
+  async function pickFiles(files: File[]) {
+    if (files.length === 0 || !agentKey || uploading || sending) return;
     setUploading(true);
     try {
       const c = await api.createConversation(agentKey, "", llmProfileId);
-      const r = await api.chatUpload("session", `conv-${c.id}`, Array.from(files));
+      const r = await api.chatUpload("session", `conv-${c.id}`, files);
       onStarted(c, { input, attachments: r.attachments });
     } catch (e) {
       toast.error("上传失败：" + (e as Error).message);
@@ -455,7 +459,7 @@ function DraftChat({
         onChange={setInput}
         onSend={send}
         disabled={sending || uploading || !agentKey}
-        placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+        placeholder="输入消息，@ 引用记录，Enter 发送"
         leftSlot={agentPicker}
         onPickFiles={pickFiles}
         uploading={uploading}
@@ -490,6 +494,7 @@ function ChatView({
   onTitleMaybeChanged: () => void;
   onConvUpdated: () => void;
 }) {
+  const approvalFocus = useApprovalFocus({ conversationId: conv.id });
   const [messages, setMessages] = React.useState<Activity[]>([]);
   const [running, setRunning] = React.useState(false);
   const [input, setInput] = React.useState(initial?.input ?? "");
@@ -502,6 +507,7 @@ function ChatView({
   const earliestRef = React.useRef(0); // earliest loaded id — reverse-pagination anchor
   const hasMoreRef = React.useRef(false); // older history remains above the loaded window
   const loadingMoreRef = React.useRef(false); // guard: one scroll-up load at a time
+  const [historyLoaded, setHistoryLoaded] = React.useState(false);
   const [hasMore, setHasMore] = React.useState(false); // drives the "load earlier" hint
   const agent = agents.find((a) => a.key === conv.agent_key);
   const currentProfileId = conv.llm_profile_id ?? null;
@@ -539,6 +545,7 @@ function ChatView({
     hasMoreRef.current = false;
     setHasMore(false);
     setMessages([]);
+    setHistoryLoaded(false);
     setRunning(false);
     let live = true;
     api
@@ -551,9 +558,12 @@ function ChatView({
         hasMoreRef.current = r.hasMore;
         setHasMore(r.hasMore);
         setRunning((current) => current || r.running);
+        setHistoryLoaded(true);
       })
       .catch(() => {
-        /* The empty state remains usable when history loading fails. */
+        // A source link can retry history through its locator; ordinary chats
+        // retain the existing usable empty state on a transient failure.
+        if (live) setHistoryLoaded(true);
       });
     return () => {
       live = false;
@@ -597,6 +607,15 @@ function ChatView({
     };
   }, [running, conv.id, onTitleMaybeChanged]);
 
+  const loadFocusPage = React.useCallback((before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE), [conv.id]);
+  const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
+    setMessages((prev) => mergeActivities(page.items, prev));
+    earliestRef.current = page.items[0]?.seq ?? earliestRef.current;
+    hasMoreRef.current = page.hasMore;
+    setHasMore(page.hasMore);
+  }, []);
+  const focusHistory = useApprovalHistory(approvalFocus.state?.source, historyLoaded, messages, loadFocusPage, mergeFocusPage);
+
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const atBottomRef = React.useRef(true);
@@ -635,12 +654,13 @@ function ChatView({
     const vp = viewport();
     if (!vp) return;
     const onScroll = () => {
+      if (approvalFocus.state && !focusHistory.ready) return;
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
       if (vp.scrollTop <= 80) void loadEarlier(); // near top → pull an older page
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
     return () => vp.removeEventListener("scroll", onScroll);
-  }, [viewport, loadEarlier]);
+  }, [viewport, loadEarlier, approvalFocus.state, focusHistory.ready]);
   // open/switch a conversation → jump to the latest (bottom)
   // biome-ignore lint/correctness/useExhaustiveDependencies: changing conversations intentionally retriggers the scroll reset.
   React.useLayoutEffect(() => {
@@ -653,10 +673,10 @@ function ChatView({
   // new activity → stick to bottom only if the user is already pinned there
   // biome-ignore lint/correctness/useExhaustiveDependencies: message and running changes intentionally retrigger bottom anchoring.
   React.useLayoutEffect(() => {
-    if (!atBottomRef.current) return;
+    if (approvalFocus.state || !atBottomRef.current) return;
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [messages, running, viewport]);
+  }, [messages, running, viewport, approvalFocus.state]);
 
   // Per-conversation token total, live — same accounting as the main-agent
   // console: completed runs' `result` sum + the in-progress run's latest `usage`.
@@ -689,11 +709,11 @@ function ChatView({
 
   // pickFiles uploads into this conversation's session dir (sessions/conv-<id>/
   // uploads/) and queues the returned metadata to send with the next message.
-  async function pickFiles(files: FileList | null) {
-    if (!files || files.length === 0) return;
+  async function pickFiles(files: File[]) {
+    if (files.length === 0) return;
     setUploading(true);
     try {
-      const r = await api.chatUpload("session", `conv-${conv.id}`, Array.from(files));
+      const r = await api.chatUpload("session", `conv-${conv.id}`, files);
       setAttachments((prev) => [...prev, ...r.attachments]);
     } catch (e) {
       toast.error("上传失败：" + (e as Error).message);
@@ -770,6 +790,8 @@ function ChatView({
         </div>
       </div>
 
+      <ApprovalExecutionFocus focus={approvalFocus} history={focusHistory} />
+
       {/* messages */}
       <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
         <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
@@ -782,7 +804,7 @@ function ChatView({
               {hasMore && (
                 <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
               )}
-              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} />
+              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
             </>
           )}
         </div>
@@ -792,9 +814,9 @@ function ChatView({
         value={input}
         onChange={setInput}
         onSend={send}
-        disabled={running}
+        disabled={running || sending}
         allowBtw
-        placeholder={running ? "Agent 正在回复，可输入 /btw 提问…" : "输入消息，Enter 发送，Shift+Enter 换行"}
+        placeholder={running ? "Agent 正在回复，可输入 /btw 提问…" : "输入消息，@ 引用记录，Enter 发送"}
         running={running}
         onStop={stop}
         stopDisabled={stopping}
@@ -1026,6 +1048,18 @@ export default function ChatPage() {
   const [convs, setConvs] = React.useState<Conversation[]>([]);
   const [agentFilter, setAgentFilter] = React.useState<string | null>(null);
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
+  const [sourceRequested, setSourceRequested] = React.useState(false);
+  const [convsLoaded, setConvsLoaded] = React.useState(false);
+  const selectConversation = React.useCallback((id: number | null) => {
+    if (id !== selectedId) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("approval");
+      setSourceRequested(false);
+      window.history.replaceState(null, "", url);
+    }
+    setSelectedId(id);
+  }, [selectedId]);
+
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
   const [selectedConversationIds, setSelectedConversationIds] = React.useState<Set<number>>(() => new Set());
@@ -1051,7 +1085,7 @@ export default function ChatPage() {
     const seq = ++conversationListSeq.current;
     try {
       const items = await api.conversations();
-      if (seq === conversationListSeq.current) setConvs(items);
+      if (seq === conversationListSeq.current) { setConvs(items); setConvsLoaded(true); }
     } catch {
       // Preserve the selected transcript and list on a transient poll failure.
     }
@@ -1122,7 +1156,9 @@ export default function ChatPage() {
   // returns to the same thread instead of the empty draft view. Runs after
   // hydration (not a lazy useState init) to avoid a server/client mismatch.
   React.useEffect(() => {
-    const c = new URLSearchParams(window.location.search).get("c");
+    const params = new URLSearchParams(window.location.search);
+    setSourceRequested(params.has("approval"));
+    const c = params.get("c");
     const id = c ? Number(c) : NaN;
     if (Number.isFinite(id)) setSelectedId(id);
   }, []);
@@ -1249,7 +1285,7 @@ export default function ChatPage() {
           else failed.push({ id: item.id, error: item.error ?? "对话不存在" });
         }
       }
-      if (deleted.has(selectedId ?? -1)) setSelectedId(null);
+      if (deleted.has(selectedId ?? -1)) selectConversation(null);
       setSelectedConversationIds((current) => {
         const next = new Set(current);
         for (const id of deleted) next.delete(id);
@@ -1318,7 +1354,7 @@ export default function ChatPage() {
         {/* left: conversation list */}
         <div className="bg-card flex flex-col overflow-hidden rounded-lg border">
           <div className="flex flex-col gap-2 border-b p-2">
-            <Button size="sm" className="w-full" onClick={() => setSelectedId(null)}>
+            <Button size="sm" className="w-full" onClick={() => selectConversation(null)}>
               <PlusIcon /> 新建对话
             </Button>
             <Select
@@ -1405,7 +1441,7 @@ export default function ChatPage() {
                   active={selectedId === c.id}
                   renaming={renamingId === c.id}
                   renameText={renamingId === c.id ? renameText : ""}
-                  onSelect={setSelectedId}
+                  onSelect={selectConversation}
                   onStartRename={startRename}
                   onRenameText={setRenameText}
                   onCommitRename={commitRename}
@@ -1437,7 +1473,7 @@ export default function ChatPage() {
                           active={selectedId === c.id}
                           renaming={renamingId === c.id}
                           renameText={renamingId === c.id ? renameText : ""}
-                          onSelect={setSelectedId}
+                          onSelect={selectConversation}
                           onStartRename={startRename}
                           onRenameText={setRenameText}
                           onCommitRename={commitRename}
@@ -1479,6 +1515,10 @@ export default function ChatPage() {
               onTitleMaybeChanged={reloadConvs}
               onConvUpdated={reloadConvs}
             />
+          ) : sourceRequested ? (
+            <div role="status" className="p-6 text-sm text-muted-foreground">
+              {convsLoaded ? "对话已被删除" : "正在加载对应对话…"}
+            </div>
           ) : (
             <DraftChat
               agents={chatAgents}

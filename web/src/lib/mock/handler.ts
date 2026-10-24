@@ -880,6 +880,20 @@ export async function mockHandle<T>(method: string, rawPath: string, body?: Body
 function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Record<string, unknown>): unknown {
   const task = q.get("task") ?? undefined;
 
+  if (path === "/chat/mentions" && m === "GET") {
+    const kind = q.get("kind") ?? "";
+    const query = (q.get("q") ?? "").trim().toLowerCase();
+    const candidates = [
+      ...D.findings.map((finding, index) => ({ kind: "finding", id: index + 1, label: finding.name || finding.vulnclass, description: `${finding.severity} · ${finding.summary}` })),
+      ...D.companies.map((company) => ({ kind: "company", id: company.id, label: company.name, description: "企业" })),
+      ...D.assets.map((asset) => ({ kind: asset.type, id: asset.id, label: asset.type === "endpoint" ? `${asset.method || "GET"} ${asset.url}` : asset.app_name || asset.url || asset.domain || asset.ip || asset.bundle_id || `资产 #${asset.id}`, description: [asset.type, asset.page_title, asset.service_name, asset.bundle_id, asset.ip].filter(Boolean).join(" · ") })),
+    ];
+    const filtered = candidates.filter((item) => (!kind || kind === item.kind || (kind === "asset" && item.kind !== "finding" && item.kind !== "company")) && (!query || String(item.id) === query || `${item.label} ${item.description}`.toLowerCase().includes(query)))
+      .sort((a, b) => Number(String(b.id) === query) - Number(String(a.id) === query) || b.id - a.id || a.kind.localeCompare(b.kind));
+    const offset = Math.max(0, Number(q.get("cursor")) || 0);
+    return { items: filtered.slice(offset, offset + 20), next_cursor: offset + 20 < filtered.length ? String(offset + 20) : undefined };
+  }
+
   // ── auth：让 demo 直接进主界面 ──
   if (path === "/auth/status") return { initialized: true };
   if (path === "/auth/login" || path === "/auth/init") return { token: "mock-demo" };
@@ -1278,20 +1292,32 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     if (b.action === "cancel") {
       const index = mockIntents.findIndex((item) => item.id === id);
       const intent = mockIntents[index];
-      if (!intent || intent.inherited || (intent.state !== "running" && intent.state !== "paused")) {
+      if (
+        !intent ||
+        intent.inherited ||
+        (intent.state !== "running" && intent.state !== "paused" && intent.state !== "open")
+      ) {
         throw new Error("Worker 状态已变化");
       }
-      mockIntents.splice(index, 1);
-      return {
-        id: Number(id.replace(/\D/g, "")) || 0,
-        state: "cancelled",
-        deleted: {
-          intents: 1,
-          facts: 1,
-          findings: 1,
-          activities: mockActivity.filter((item) => item.intent_id === id).length,
-        },
-      };
+      const numId = Number(id.replace(/\D/g, "")) || 0;
+      if (b.mode === "hard") {
+        // 真删除:从列表移除,返回级联删除计数。
+        mockIntents.splice(index, 1);
+        return {
+          id: numId,
+          state: "",
+          deleted: {
+            intents: 1,
+            facts: 1,
+            findings: 1,
+            activities: mockActivity.filter((item) => item.intent_id === id).length,
+          },
+        };
+      }
+      // 假删除(默认):置 deleted + 记删除原因,保留节点。
+      intent.state = "deleted";
+      intent.delete_reason = String(b.reason ?? "");
+      return { id: numId, state: "deleted" };
     }
     const action = b.action === "resume" ? "resume" : "pause";
     const result = controlMockIntent(id, action);
@@ -2056,7 +2082,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "intercept" && seg[1] === "pending" && seg[3] === "decide") {
     const id = Number(seg[2]);
     const row = mockInterceptHistory.find((r) => r.id === id) ?? mockInterceptPending.find((r) => r.id === id);
-    if (!row || row.status !== "pending") throw new Error("审批已处理或不存在，请刷新记录");
+    if (row?.status !== "pending") throw new Error("审批已处理或不存在，请刷新记录");
     if (b.decision !== "allowed" && b.decision !== "denied") throw new Error("无效审批动作");
     row.status = b.decision;
     row.decided_at = new Date().toISOString();
@@ -2076,9 +2102,27 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
   if (seg[0] === "intercept" && seg[1] === "pending" && seg.length === 3 && m === "GET")
     return mockInterceptPending.find((p) => p.id === Number(seg[2])) ?? null;
-  if (path === "/intercept/history") return { items: mockInterceptHistory };
-  if (seg[0] === "intercept" && seg[1] === "task")
-    return { items: mockInterceptHistory.filter((r) => r.task_id === seg[2]) };
+  if (path === "/intercept/history" || (seg[0] === "intercept" && seg[1] === "task")) {
+    const status = q.get("status") || "";
+    const decisionSource = q.get("decision_source") || "";
+    if (status && !["pending", "allowed", "denied", "timeout"].includes(status)) throw new Error("无效审批状态");
+    if (decisionSource && !["model", "rule", "unknown"].includes(decisionSource)) throw new Error("无效判定来源");
+    const filtered = mockInterceptHistory.filter((row) => {
+      const source = row.decision_source || (row.rule_id ? "rule" : row.reason?.startsWith("[模型]") ? "model" : "unknown");
+      return (seg[1] !== "task" || row.task_id === decodeURIComponent(seg[2])) &&
+        (!status || row.status === status) && (!decisionSource || source === decisionSource);
+    });
+    if (!q.has("page") && !q.has("size") && !status && !decisionSource) return { items: filtered, total: filtered.length };
+    const page = Math.max(1, Number(q.get("page")) || 1);
+    const size = Math.min(100, Math.max(1, Number(q.get("size")) || 20));
+    const offset = (page - 1) * size;
+    return {
+      items: filtered.slice(offset, offset + size),
+      total: filtered.length,
+      page,
+      page_size: size,
+    };
+  }
   if (path === "/intercept/tool-config") return { enabled_tools: ["bash"] };
   if (path === "/intercept/judge" && m === "GET")
     return {
@@ -2091,6 +2135,13 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       ask_timeout_action: "deny",
     };
   if (path === "/intercept/judge" && m === "PUT") return { ok: true };
+
+  // ── 旁路提问(/btw)：demo 无旁路会话 ──
+  // 必须显式命中：路径以 s 结尾会被下面的读兜底判成集合返回 []，items 就成了 undefined。
+  if (seg.at(-1) === "side-questions") {
+    if (m === "GET") return { items: [], current: null, next_cursor: 0, snapshot: null };
+    if (m === "POST") throw new Error("演示模式不支持旁路提问");
+  }
 
   // ── 写操作兜底：成功但不落库 ──
   if (["POST", "PUT", "PATCH", "DELETE"].includes(m)) return { ok: true };
