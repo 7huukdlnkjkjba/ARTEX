@@ -270,7 +270,7 @@ func (m *msfSession) ensureRPC(ctx context.Context, password, mode string) (stri
 	if password == "" {
 		return "", fmt.Errorf("Metasploit RPC 未连接，且没有提供密码：传 rpc_password 或设置 ARTEX_MSF_RPC_PASSWORD/设置项 msf_rpc_password")
 	}
-	modes := []bool{true, false}
+	modes := []bool{false, true}
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "true", "1", "yes":
 		modes = []bool{true}
@@ -665,15 +665,28 @@ func consoleData(txt string) (string, bool) {
 // msfSessionEvidence runs a read-only triage bundle in a fresh session and
 // returns its output. Failures are non-fatal: the session itself is the win.
 func (s *Server) msfSessionEvidence(ctx context.Context, sess *msfSession, id string) string {
-	cmd := "id 2>/dev/null; whoami; hostname; uname -a 2>/dev/null; (ip -brief addr 2>/dev/null || ifconfig 2>/dev/null)"
-	txt, err := sess.call(ctx, "session_run_command", map[string]any{
-		"session_id": id, "command": cmd, "timeout": 60, "timeout_exception": false,
-	})
-	if err != nil {
-		log.Printf("[msf] 会话 %s 取证失败：%v", id, err)
-		return ""
+	// interact_session writes raw bytes (a shell needs the trailing newline) and
+	// reads back after ~1s; a just-opened shell often returns empty on the first
+	// call, so poll a few times before giving up.
+	cmd := "id; whoami; hostname\n"
+	var last string
+	for attempt := 0; attempt < 6; attempt++ {
+		select {
+		case <-time.After(1200 * time.Millisecond):
+		case <-ctx.Done():
+			return last
+		}
+		txt, err := sess.call(ctx, "interact_session", map[string]any{"session_id": id, "command": cmd})
+		if err != nil {
+			last = ""
+			continue
+		}
+		if out := sessionOutput(txt); out != "" {
+			return out
+		}
 	}
-	return sessionOutput(txt)
+	log.Printf("[msf] 会话 %s 取证为空（interact_session 连续 6 次无输出）", id)
+	return last
 }
 
 func sessionOutput(txt string) string {
