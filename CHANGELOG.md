@@ -4,22 +4,6 @@
 
 ## [Unreleased]
 
-## [0.3.19] - 2026-10-25
-
-### Metasploit 闭环
-
-#### 新增的功能
-
-- **首次启动自动安装 `mcp-pymetasploit3`**：检测不到时后台执行
-  `pip install "mcp-pymetasploit3[mcp]"`（最长 5 分钟，失败只记日志、不影响启动）；
-  `ARTEX_MSF_AUTO_INSTALL=0` 关闭，`ARTEX_MSF_PYTHON=/path/to/python` 指定解释器/venv。
-- **显式安装 `[mcp]` extra**：只装包本体时缺少 `fastmcp`，`import mcp_pymetasploit3` 会失败。
-
-#### 设计说明
-
-- 安装跑在后台 goroutine，不阻塞 ARTEX 启动；`msf_execute` 每次重新探测启动器，装好即生效。
-- 指定 `ARTEX_MSF_PYTHON` 后只认该解释器（忽略 PATH 上其它 console 脚本），便于 venv 隔离与测试。
-
 ## [0.3.18] - 2026-10-25
 
 ### Metasploit 全自动闭环
@@ -40,6 +24,10 @@
 - **会话自动取证与写回**：`msf_execute` 拿到新会话即执行 id/whoami/hostname/uname/ip 只读取证，
   把输出写回 fact（`msf_session_id`/`msf_plan_id`，confirmed）并唤醒 planner——利用到证据落图
   不再依赖模型补轮次。
+- **依赖自动安装**：首次启动检测不到 `mcp-pymetasploit3` 时后台执行
+  `pip install "mcp-pymetasploit3[mcp]"`（后台 goroutine，最长 5 分钟，失败只记日志、不影响启动；
+  `ARTEX_MSF_AUTO_INSTALL=0` 关闭，`ARTEX_MSF_PYTHON=/path/to/python` 指定解释器/venv，
+  指定后只认该解释器）。显式带 `[mcp]` extra——只装包本体缺 `fastmcp` 时 import 会失败。
 - **安全边界**：`msf_execute` 先对目标做任务 `task_scope` 硬校验，越界拒绝；只应在漏洞确认后调用，
   失败按分支表处理且禁止原样重试同一候选。
 - 文档：`MSF-CLOSED-LOOP.md`（安装、模块映射、分支语义、闭环用法）、`scripts/setup-msf-mcp.ps1`。

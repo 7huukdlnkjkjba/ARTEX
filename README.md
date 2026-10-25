@@ -18,8 +18,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | 版本 | 内容 |
 |---|---|
 | **v0.3.17** | 并入「外网突破 → 立足点 → 内网纵深」：webshell 会话、penelope 反弹、`session_recon`、suo5/chisel 隧道、内网拓扑、凭据库、待授权网段、任务移交、伪装门控、一键放行、RoE 三态、蜜罐识别、chains 技能、`artex doctor` |
-| **v0.3.18** | Metasploit **全自动闭环**：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、漏洞确认后自动派单、会话自动取证并写回 fact |
-| **v0.3.19** | 闭环依赖**自动安装**：首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`（可关、可指定解释器） |
+| **v0.3.18** | Metasploit **全自动闭环**：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、漏洞确认后自动派单、会话自动取证并写回 fact；闭环依赖**自动安装**（首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`，可关、可指定解释器） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
