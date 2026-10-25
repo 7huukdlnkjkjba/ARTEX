@@ -11,6 +11,21 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ---
 
+## 版本与近期更新
+
+本仓库（[7huukdlnkjkjba/ARTEX](https://github.com/7huukdlnkjkjba/ARTEX)）在上游基础上持续二开：
+
+| 版本 | 内容 |
+|---|---|
+| **v0.3.17** | 并入「外网突破 → 立足点 → 内网纵深」：webshell 会话、penelope 反弹、`session_recon`、suo5/chisel 隧道、内网拓扑、凭据库、待授权网段、任务移交、伪装门控、一键放行、RoE 三态、蜜罐识别、chains 技能、`artex doctor` |
+| **v0.3.18（未发布）** | Metasploit **全自动闭环**：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、漏洞确认后自动派单、会话自动取证并写回 fact |
+
+- 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
+- Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
+- 完整变更：[CHANGELOG.md](CHANGELOG.md)
+
+---
+
 ## 截图预览
 
 > 完整交互见[在线 Demo](https://artex-demo.vercel.app/)。
@@ -106,11 +121,12 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
+> 可选：启用 Metasploit 全自动闭环需 `pip install mcp-pymetasploit3`，并安装 Metasploit（ARTEX 会自己拉起受管 `msfrpcd`）。
 
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
-git clone https://github.com/Hinln/ARTEX.git
+git clone https://github.com/7huukdlnkjkjba/ARTEX.git
 cd ARTEX
 ./install.sh
 ```
@@ -125,7 +141,7 @@ cd ARTEX
 ### 方式二：Docker Compose（手动）
 
 ```bash
-git clone https://github.com/Hinln/ARTEX.git
+git clone https://github.com/7huukdlnkjkjba/ARTEX.git
 cd ARTEX
 cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
 docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres
