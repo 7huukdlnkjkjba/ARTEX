@@ -33,13 +33,20 @@
 可用环境变量微调：`ARTEX_MSF_AUTOSTART=0` 关闭自动启动、`ARTEX_MSF_RPC_PORT` 改端口、
 `ARTEX_MSF_RPC_ADDR` 改地址、`ARTEX_MSF_RPC_PASSWORD` 指定密码。
 
-### 1.2 MCP 服务：不需要在 UI 里配置
+### 1.2 MCP 服务：不需要在 UI 里配置，也不需要手工装包
 
-唯一的前置是 Python 包：
+首次启动时如果检测不到 `mcp-pymetasploit3`，ARTEX 会在后台自动执行：
 
 ```bash
-pip install mcp-pymetasploit3
+pip install "mcp-pymetasploit3[mcp]"
 ```
+
+- 最长 5 分钟，失败只记日志，不影响 ARTEX 启动；
+- `ARTEX_MSF_AUTO_INSTALL=0` 关闭自动安装；
+- `ARTEX_MSF_PYTHON=/path/to/python` 指定解释器或 venv（指定后只认该解释器，忽略 PATH 上的 console 脚本）。
+
+> 手动安装等价于 `pip install "mcp-pymetasploit3[mcp]"`；`[mcp]` extra 会带上 `fastmcp`，
+> 缺它时 `import mcp_pymetasploit3` 会失败。
 
 ARTEX 启动时会种入一条 disabled 的 `metasploit` MCP 配置；但 `msf_execute` **不依赖它**：
 找不到启用的 MCP 行时，会直接用内置启动器拉起 `mcp-pymetasploit3`（console 脚本优先，

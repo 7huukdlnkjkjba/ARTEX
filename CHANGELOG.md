@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [0.3.19] - 2026-10-25
+
+### Metasploit 闭环
+
+#### 新增的功能
+
+- **首次启动自动安装 `mcp-pymetasploit3`**：检测不到时后台执行
+  `pip install "mcp-pymetasploit3[mcp]"`（最长 5 分钟，失败只记日志、不影响启动）；
+  `ARTEX_MSF_AUTO_INSTALL=0` 关闭，`ARTEX_MSF_PYTHON=/path/to/python` 指定解释器/venv。
+- **显式安装 `[mcp]` extra**：只装包本体时缺少 `fastmcp`，`import mcp_pymetasploit3` 会失败。
+
+#### 设计说明
+
+- 安装跑在后台 goroutine，不阻塞 ARTEX 启动；`msf_execute` 每次重新探测启动器，装好即生效。
+- 指定 `ARTEX_MSF_PYTHON` 后只认该解释器（忽略 PATH 上其它 console 脚本），便于 venv 隔离与测试。
+
 ## [0.3.18] - 2026-10-25
 
 ### Metasploit 全自动闭环

@@ -19,6 +19,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 |---|---|
 | **v0.3.17** | 并入「外网突破 → 立足点 → 内网纵深」：webshell 会话、penelope 反弹、`session_recon`、suo5/chisel 隧道、内网拓扑、凭据库、待授权网段、任务移交、伪装门控、一键放行、RoE 三态、蜜罐识别、chains 技能、`artex doctor` |
 | **v0.3.18** | Metasploit **全自动闭环**：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、漏洞确认后自动派单、会话自动取证并写回 fact |
+| **v0.3.19** | 闭环依赖**自动安装**：首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`（可关、可指定解释器） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -112,7 +113,9 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - **边界**：`msf_execute` 先做任务 scope 硬校验（越界拒绝）；失败按
   `msf_next` 的 retry / degrade / stop 处理，禁止原样重试同一候选。
 
-前置只有一个：`pip install mcp-pymetasploit3`（Metasploit 已安装时无需手工启动 msfrpcd）。
+**零手工安装**：首次启动检测不到 `mcp-pymetasploit3` 时，ARTEX 会自动执行
+`pip install "mcp-pymetasploit3[mcp]"`（后台执行，最长 5 分钟；`ARTEX_MSF_AUTO_INSTALL=0` 可关，
+`ARTEX_MSF_PYTHON=/path/to/python` 可指定解释器/venv）。Metasploit 已安装时也无需手工启动 msfrpcd。
 模块映射、分支语义与环境变量见 [MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)，Windows 可用
 [scripts/setup-msf-mcp.ps1](scripts/setup-msf-mcp.ps1) 做预检。
 

@@ -90,29 +90,110 @@ func findMSFRPCD() string {
 	return ""
 }
 
+// msfPythonBin resolves the Python interpreter: ARTEX_MSF_PYTHON wins, then
+// python/python3/py on PATH.
+func msfPythonBin() string {
+	if p := strings.TrimSpace(os.Getenv("ARTEX_MSF_PYTHON")); p != "" {
+		return p
+	}
+	for _, name := range []string{"python", "python3", "py"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+func mcpModuleAvailable(python string) bool {
+	if python == "" {
+		return false
+	}
+	check := exec.Command(python, "-c", "import mcp_pymetasploit3")
+	check.Stdout, check.Stderr = nil, nil
+	return check.Run() == nil
+}
+
+func mcpConsoleAvailable() bool {
+	_, err := exec.LookPath("mcp-pymetasploit3[mcp]")
+	return err == nil
+}
+
+// mcpReady reports whether the launcher we would actually use is installed.
+// When ARTEX_MSF_PYTHON pins an interpreter, that interpreter is authoritative
+// (a console script elsewhere on PATH is ignored), which also makes the
+// auto-install path testable against a clean venv.
+func mcpReady() bool {
+	if p := strings.TrimSpace(os.Getenv("ARTEX_MSF_PYTHON")); p != "" {
+		return mcpModuleAvailable(p)
+	}
+	return mcpConsoleAvailable() || mcpModuleAvailable(msfPythonBin())
+}
+
 // findMCPLauncher resolves how to spawn mcp-pymetasploit3 without requiring the
 // user to configure an MCP server row: console script first, then `python -m`.
 func findMCPLauncher() (string, []string, bool) {
-	if p, err := exec.LookPath("mcp-pymetasploit3"); err == nil {
-		return p, nil, true
-	}
-	python := ""
-	for _, name := range []string{"python", "python3", "py"} {
-		if p, err := exec.LookPath(name); err == nil {
-			python = p
-			break
+	if strings.TrimSpace(os.Getenv("ARTEX_MSF_PYTHON")) == "" {
+		if p, err := exec.LookPath("mcp-pymetasploit3[mcp]"); err == nil {
+			return p, nil, true
 		}
 	}
-	if python == "" {
-		return "", nil, false
-	}
-	// Verify the module exists, otherwise stdio connect would fail confusingly.
-	check := exec.Command(python, "-c", "import mcp_pymetasploit3")
-	check.Stdout, check.Stderr = nil, nil
-	if err := check.Run(); err != nil {
+	python := msfPythonBin()
+	if !mcpModuleAvailable(python) {
 		return "", nil, false
 	}
 	return python, []string{"-m", "mcp_pymetasploit3"}, true
+}
+
+// msfAutoInstallEnabled: default ON; ARTEX_MSF_AUTO_INSTALL=0/false/off disables.
+func msfAutoInstallEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ARTEX_MSF_AUTO_INSTALL"))) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
+}
+
+// ensureMCPPython installs mcp-pymetasploit3 on first boot when it is missing.
+// It runs in the background so a slow/absent network never blocks ARTEX startup;
+// every failure is logged and the closed loop degrades to "MCP unavailable".
+func (s *Server) ensureMCPPython() {
+	if mcpReady() {
+		return
+	}
+	if !msfAutoInstallEnabled() {
+		log.Printf("[msf] 未安装 mcp-pymetasploit3，且自动安装已关闭（ARTEX_MSF_AUTO_INSTALL）")
+		return
+	}
+	python := msfPythonBin()
+	if python == "" {
+		log.Printf("[msf] 未找到 Python，无法自动安装 mcp-pymetasploit3；请安装 Python 3.11+ 后重启")
+		return
+	}
+	log.Printf("[msf] 未检测到 mcp-pymetasploit3，开始自动安装（pip，最长 5 分钟）…")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.ctx.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	cmd := exec.CommandContext(ctx, python, "-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "mcp-pymetasploit3[mcp]")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		tail := strings.TrimSpace(string(out))
+		if len(tail) > 800 {
+			tail = tail[len(tail)-800:]
+		}
+		log.Printf("[msf] 自动安装失败：%v\n%s", err, tail)
+		return
+	}
+	if !mcpReady() {
+		log.Printf("[msf] pip 返回成功但仍无法导入 mcp_pymetasploit3（检查 PATH / venv）")
+		return
+	}
+	log.Printf("[msf] mcp-pymetasploit3 自动安装完成")
 }
 
 // maybeStartMSF is called once during server construction. It is best-effort:
@@ -123,6 +204,7 @@ func (s *Server) maybeStartMSF() {
 		log.Printf("[msf] 自动启动已关闭（ARTEX_MSF_AUTOSTART）")
 		return
 	}
+	go s.ensureMCPPython() // 首次启动自动补齐 mcp-pymetasploit3（ARTEX_MSF_AUTO_INSTALL=0 可关）
 	port := 55553
 	if v := strings.TrimSpace(os.Getenv("ARTEX_MSF_RPC_PORT")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n < 65536 {
