@@ -49,6 +49,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools = append(tools, s.credentialTools()...) // 凭据工具(期 2),默认绑 worker
 	tools = append(tools, s.tunnelTools()...)    // 隧道四件套(期 3a),默认绑 worker
 	tools = append(tools, s.reverseTools()...)   // 反弹监听(期 5),默认绑 worker
+	tools = append(tools, s.msfTools()...)       // Metasploit 决策层(msf_plan/msf_next/msf_execute),默认绑 worker
 	custom, err := s.customTools()
 	if err != nil {
 		log.Printf("[custom-tool] 加载失败: %v", err)

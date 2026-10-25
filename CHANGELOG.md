@@ -2,6 +2,23 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [Unreleased]
+
+### Metasploit 全自动闭环
+
+#### 新增的功能
+
+- **决策层 `msf/`**：按漏洞类别/目标给出确定性的候选模块、参数、前置条件与失败分支；同一输入
+  永远得到同一 `plan_id` 与顺序，未收录类别返回 `search_modules` 检索建议（不猜模块名）。
+- **worker 三个工具**：`msf_plan`（只读决策）、`msf_next`（无状态分支选择：retry/degrade/session/stop）、
+  `msf_execute`（连 metasploit MCP 自动跑候选链：use_module → set_option → execute → 轮询 list_sessions）。
+- **接入 mcp-pymetasploit3**：启动时种入 disabled 的 stdio MCP 配置（`metasploit` / `mcp-pymetasploit3`），
+  在「系统 → MCP」启用并授权工具可见性即可；RPC 密码支持入参 / `ARTEX_MSF_RPC_PASSWORD` / 设置项。
+- **安全边界**：`msf_execute` 先对目标做任务 `task_scope` 硬校验，越界拒绝；只应在漏洞确认后调用，
+  失败按分支表处理且禁止原样重试同一候选。
+- 文档：`MSF-CLOSED-LOOP.md`（安装、模块映射、分支语义、闭环用法）、`scripts/setup-msf-mcp.ps1`。
+
+
 ## [0.3.17] - 2026-10-24
 
 本版把 artex-ymh 二开分支（外网突破 → 立足点 → 内网纵深）并入 0.3.16 主线，同时保留
@@ -55,7 +72,6 @@
 
 - norma 保持 **v0.4.3**（上游 0.3.16 版本），fork 侧基于 v0.3.8 的代码已按新 API 适配。
 
-## [Unreleased]
 
 ### 成本控制
 

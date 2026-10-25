@@ -83,6 +83,23 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ---
 
+## Metasploit 全自动闭环（msf）
+
+对接 [mcp-pymetasploit3](https://github.com/daedalus/mcp-pymetasploit3)（Metasploit RPC 的 MCP 封装）：
+
+- **决策层**（`msf/`，纯函数）：漏洞类别/目标 → 确定性候选模块、参数、前置条件、失败分支；
+  同一输入永远得到同一 `plan_id` 与同一顺序，未收录的类别返回 `search_modules` 检索建议而不是猜模块。
+- **执行层**：`msf_plan`（只读）→ `msf_execute`（连 MCP，use_module → 设参 → execute → 轮询 `list_sessions`，
+  无会话自动切下一候选）→ 拿到 session 后按 `session_post` 取证并写回 fact。
+- **边界**：`msf_execute` 先做任务 scope 硬校验（越界拒绝），只应在漏洞确认后使用；失败按
+  `msf_next` 的 retry / degrade / stop 处理，禁止原样重试同一候选。
+
+安装（msfrpcd、`pip install mcp-pymetasploit3`、系统→MCP 启用内置 `metasploit`、工具可见性授权给
+worker、RPC 密码）与模块映射表见 [MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)，Windows 可用
+[scripts/setup-msf-mcp.ps1](scripts/setup-msf-mcp.ps1) 做预检。
+
+---
+
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
