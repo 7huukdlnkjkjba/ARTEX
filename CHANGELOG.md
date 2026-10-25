@@ -19,6 +19,9 @@
 - **AI 自动触发**：验证器把漏洞置为 confirmed（或 UI 手动确认）时，`OnFindingConfirmed` →
   `msfAutoKick` 写 hint 并唤醒 planner，自动派 worker 执行 `msf_plan` → `msf_execute`；
   人只负责目标与授权范围。
+- **会话自动取证与写回**：`msf_execute` 拿到新会话即执行 id/whoami/hostname/uname/ip 只读取证，
+  把输出写回 fact（`msf_session_id`/`msf_plan_id`，confirmed）并唤醒 planner——利用到证据落图
+  不再依赖模型补轮次。
 - **安全边界**：`msf_execute` 先对目标做任务 `task_scope` 硬校验，越界拒绝；只应在漏洞确认后调用，
   失败按分支表处理且禁止原样重试同一候选。
 - 文档：`MSF-CLOSED-LOOP.md`（安装、模块映射、分支语义、闭环用法）、`scripts/setup-msf-mcp.ps1`。
