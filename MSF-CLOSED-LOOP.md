@@ -133,6 +133,12 @@ ssh/mysql/mssql/smb 口令类。
 
 ## 5. 限制与注意事项
 
+- **MCP 的模块工具是无状态的**：`set_module_option` 每次都会重新 `modules.use(...)`，跨调用设置的
+  `TARGETURI`/`SSL` 等不会保留。因此 `msf_execute` 走 **console 路径**（同一 console 内
+  `use` → `set ...` → `run -j`），只有 console 不可用时才退回 `execute_module`（只支持
+  rhosts/rport/lhost/lport/payload，其余参数会丢失）。
+- **RPC SSL**：默认 `msfrpcd` 开 TLS，`msfrpcd -S` 是明文。`msf_execute` 默认 `rpc_ssl=auto`
+  （先 TLS 再明文），也可用 `rpc_ssl` 入参或 `ARTEX_MSF_RPC_SSL=true|false` 固定。
 - 模块路径随 MSF 版本变动；执行前会 `get_module_info` 校验，缺失自动走 `module_missing`。
 - 反弹 payload 需要目标能回连 `LHOST`；内网场景先建隧道再给 `LHOST` 为平台可达地址。
 - 高交互/加固目标可能「check 通但拿不到会话」，此时按 `degrade` 写否定结论，不无限重试。

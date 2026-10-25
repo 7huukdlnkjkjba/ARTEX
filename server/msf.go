@@ -246,8 +246,11 @@ func (s *Server) msfConnect(ctx context.Context) (*msfSession, error) {
 	return m, nil
 }
 
-// ensureRPC makes sure the MCP server is authenticated to msfrpcd.
-func (m *msfSession) ensureRPC(ctx context.Context, password string) (string, error) {
+// ensureRPC makes sure the MCP server is authenticated to msfrpcd. mode is
+// "auto" (try TLS first, then plaintext), "true" or "false". Auto exists because
+// msfrpcd enables TLS by default while `msfrpcd -S` serves plaintext, and both
+// deployments are common.
+func (m *msfSession) ensureRPC(ctx context.Context, password, mode string) (string, error) {
 	info, _ := m.call(ctx, "get_client_info", map[string]any{})
 	if strings.Contains(info, `"connected": true`) || strings.Contains(info, `"authenticated": true`) {
 		return info, nil
@@ -255,10 +258,27 @@ func (m *msfSession) ensureRPC(ctx context.Context, password string) (string, er
 	if password == "" {
 		return "", fmt.Errorf("Metasploit RPC 未连接，且没有提供密码：传 rpc_password 或设置 ARTEX_MSF_RPC_PASSWORD/设置项 msf_rpc_password")
 	}
-	txt, err := m.call(ctx, "connect", map[string]any{
-		"password": password, "host": "127.0.0.1", "port": 55553, "ssl": false,
-	})
-	return txt, err
+	modes := []bool{true, false}
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "true", "1", "yes":
+		modes = []bool{true}
+	case "false", "0", "no":
+		modes = []bool{false}
+	}
+	var lastErr error
+	for _, ssl := range modes {
+		txt, err := m.call(ctx, "connect", map[string]any{
+			"password": password, "host": "127.0.0.1", "port": 55553, "ssl": ssl,
+		})
+		if err == nil && (strings.Contains(txt, `"authenticated": true`) || strings.Contains(txt, `"status": "connected"`) || strings.Contains(txt, `"status":"connected"`)) {
+			return txt, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("connect 返回未认证：%s", truncateForTool(txt))
+		}
+		lastErr = err
+	}
+	return "", fmt.Errorf("连接 msfrpcd 失败（已尝试 ssl=%v）：%v", modes, lastErr)
 }
 
 func parseSessionIDs(text string) map[string]bool {
@@ -291,6 +311,8 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 	schema := msfSchema()
 	props := schema["properties"].(map[string]any)
 	props["rpc_password"] = map[string]any{"type": "string", "description": "msfrpcd 密码（缺省读 ARTEX_MSF_RPC_PASSWORD / 设置项 msf_rpc_password）"}
+	props["rpc_ssl"] = map[string]any{"type": "string", "enum": []any{"auto", "true", "false"},
+		"description": "msfrpcd 是否 SSL：auto=先试 SSL 再回退明文（默认，兼容默认 msfrpcd 与 -S 启动）"}
 	props["max_candidates"] = map[string]any{"type": "integer", "description": "最多尝试几个候选，默认 3（上限 8）"}
 	props["verify_session_seconds"] = map[string]any{"type": "integer", "description": "执行后等待新会话的秒数，默认 25（上限 120）"}
 	return actool.Build(actool.Spec{
@@ -305,6 +327,7 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 			var a struct {
 				msfArgs
 				RPCPassword string `json:"rpc_password"`
+				RPCSsl      string `json:"rpc_ssl"`
 				MaxCands    int    `json:"max_candidates"`
 				WaitSecs    int    `json:"verify_session_seconds"`
 			}
@@ -340,7 +363,11 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 			if pw == "" && s.m.pg != nil {
 				pw, _, _ = s.m.pg.GetSetting("msf_rpc_password")
 			}
-			if _, err := sess.ensureRPC(ctx, pw); err != nil {
+			sslMode := a.RPCSsl
+			if sslMode == "" {
+				sslMode = os.Getenv("ARTEX_MSF_RPC_SSL")
+			}
+			if _, err := sess.ensureRPC(ctx, pw, sslMode); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 
@@ -349,6 +376,10 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 				before = parseSessionIDs(txt)
 			}
 
+			lp := a.LPORT
+			if lp == 0 {
+				lp = 4444
+			}
 			transcript := make([]map[string]any, 0, a.MaxCands*4)
 			act := msf.Action{}
 			var got []string
@@ -366,48 +397,11 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 					act = msf.Next(plan, i, msf.OutcomeModuleMissing)
 					continue
 				}
-				// 2) load + options
-				if _, err := sess.call(ctx, "use_module", map[string]any{
-					"module_type": c.ModuleType, "module_name": c.Module,
-				}); err != nil {
-					transcript = append(transcript, map[string]any{"candidate": i, "step": "use_module", "error": err.Error()})
-					act = msf.Next(plan, i, msf.OutcomeError)
-					continue
-				}
-				for k, v := range c.Options {
-					switch k {
-					case "RHOSTS", "RPORT", "LHOST", "LPORT", "PAYLOAD":
-						continue // passed on execute_module
-					}
-					if _, err := sess.call(ctx, "set_module_option", map[string]any{
-						"module_type": c.ModuleType, "module_name": c.Module, "option": k, "value": v,
-					}); err != nil {
-						transcript = append(transcript, map[string]any{"candidate": i, "step": "set:" + k, "error": err.Error()})
-					}
-				}
-				// 3) execute
-				execArgs := map[string]any{
-					"module_type": c.ModuleType,
-					"module_name": c.Module,
-				}
-				if c.Payload != "" {
-					execArgs["payload"] = c.Payload
-				}
-				if v, ok := c.Options["RHOSTS"]; ok {
-					execArgs["rhosts"] = v
-				}
-				if v, ok := c.Options["RPORT"]; ok {
-					if n, err := strconv.Atoi(v); err == nil {
-						execArgs["rport"] = n
-					}
-				}
-				if v, ok := c.Options["LHOST"]; ok {
-					execArgs["lhost"] = v
-				}
-				if a.LPORT > 0 {
-					execArgs["lport"] = a.LPORT
-				}
-				execTxt, execErr := sess.call(ctx, "execute_module", execArgs)
+				// 2) 执行：MCP 的 use_module/set_module_option 是无状态的（每次调用都会
+				// modules.use 一个新实例），跨调用设置的 TARGETURI/SSL 等不会生效。
+				// 因此走 console 路径：use + set + run 在同一会话里串起来；console
+				// 不可用时退回 execute_module（仅 rhosts/rport/lhost/lport/payload）。
+				execTxt, execErr := sess.runCandidate(ctx, c, lp, a.WaitSecs)
 				entry := map[string]any{"candidate": i, "module": c.Module, "payload": c.Payload, "step": "execute"}
 				if execErr != nil {
 					entry["error"] = execErr.Error()
@@ -419,7 +413,7 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 					act = msf.Next(plan, i, msf.OutcomeError)
 					continue
 				}
-				// 4) wait for a new session
+				// 3) wait for a new session
 				got = waitNewSessions(ctx, sess, before, a.WaitSecs)
 				if len(got) > 0 {
 					act = msf.Next(plan, i, msf.OutcomeSession)
@@ -515,4 +509,114 @@ func (s *Server) msfScopeAllows(ctx context.Context, host string) (bool, string)
 		}
 	}
 	return false, "目标 " + host + " 不在任务授权 scope 内"
+}
+
+// createConsole opens one Metasploit console and returns its id.
+func (m *msfSession) createConsole(ctx context.Context) (string, error) {
+	txt, err := m.call(ctx, "create_console", map[string]any{})
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		CID string `json:"cid"`
+	}
+	if err := json.Unmarshal([]byte(txt), &out); err != nil || out.CID == "" {
+		return "", fmt.Errorf("create_console 返回异常：%s", truncateForTool(txt))
+	}
+	return out.CID, nil
+}
+
+// runCandidate runs one candidate through a console so every option persists
+// (the module tools are stateless per call). Falls back to execute_module when
+// console creation is unavailable.
+func (m *msfSession) runCandidate(ctx context.Context, c msf.Candidate, lport, seconds int) (string, error) {
+	cid, err := m.createConsole(ctx)
+	if err != nil {
+		return m.execDirect(ctx, c, lport)
+	}
+	defer func() { _, _ = m.call(ctx, "destroy_console", map[string]any{"console_id": cid}) }()
+
+	var script strings.Builder
+	fmt.Fprintf(&script, "use %s\n", c.Module)
+	keys := make([]string, 0, len(c.Options))
+	for k := range c.Options {
+		if k == "PAYLOAD" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&script, "set %s %s\n", k, c.Options[k])
+	}
+	if c.Payload != "" {
+		fmt.Fprintf(&script, "set PAYLOAD %s\n", c.Payload)
+	}
+	if lport > 0 {
+		fmt.Fprintf(&script, "set LPORT %d\n", lport)
+	}
+	script.WriteString("run -j\n")
+	if _, err := m.call(ctx, "write_console", map[string]any{"console_id": cid, "command": script.String()}); err != nil {
+		return "", err
+	}
+
+	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+	var out strings.Builder
+	for {
+		txt, err := m.call(ctx, "read_console", map[string]any{"console_id": cid})
+		if err == nil {
+			data, busy := consoleData(txt)
+			if data != "" {
+				out.WriteString(data)
+			}
+			low := strings.ToLower(out.String())
+			if strings.Contains(low, "session") && !busy {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return out.String(), ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return out.String(), nil
+}
+
+// execDirect is the reduced-fidelity fallback: execute_module only accepts
+// rhosts/rport/lhost/lport/payload, so TARGETURI/SSL and other options are lost.
+func (m *msfSession) execDirect(ctx context.Context, c msf.Candidate, lport int) (string, error) {
+	args := map[string]any{"module_type": c.ModuleType, "module_name": c.Module}
+	if c.Payload != "" {
+		args["payload"] = c.Payload
+	}
+	if v, ok := c.Options["RHOSTS"]; ok {
+		args["rhosts"] = v
+	}
+	if v, ok := c.Options["RPORT"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			args["rport"] = n
+		}
+	}
+	if v, ok := c.Options["LHOST"]; ok {
+		args["lhost"] = v
+	}
+	if lport > 0 {
+		args["lport"] = lport
+	}
+	return m.call(ctx, "execute_module", args)
+}
+
+func consoleData(txt string) (string, bool) {
+	var v struct {
+		Data string `json:"data"`
+		Busy bool   `json:"busy"`
+	}
+	if err := json.Unmarshal([]byte(txt), &v); err != nil {
+		return txt, false
+	}
+	return v.Data, v.Busy
 }
