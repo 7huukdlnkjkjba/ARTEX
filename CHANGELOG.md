@@ -27,7 +27,8 @@
 - **依赖自动安装**：首次启动检测不到 `mcp-pymetasploit3` 时后台执行
   `pip install "mcp-pymetasploit3[mcp]"`（后台 goroutine，最长 5 分钟，失败只记日志、不影响启动；
   `ARTEX_MSF_AUTO_INSTALL=0` 关闭，`ARTEX_MSF_PYTHON=/path/to/python` 指定解释器/venv，
-  指定后只认该解释器）。显式带 `[mcp]` extra——只装包本体缺 `fastmcp` 时 import 会失败。
+  指定后只认该解释器；安装与 RPC 自动启动解耦，`ARTEX_MSF_AUTOSTART=0` 时仍会补齐依赖）。
+  显式带 `[mcp]` extra——只装包本体缺 `fastmcp` 时 import 会失败。
 - **安全边界**：`msf_execute` 先对目标做任务 `task_scope` 硬校验，越界拒绝；只应在漏洞确认后调用，
   失败按分支表处理且禁止原样重试同一候选。
 - 文档：`MSF-CLOSED-LOOP.md`（安装、模块映射、分支语义、闭环用法）、`scripts/setup-msf-mcp.ps1`。

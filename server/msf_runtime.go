@@ -200,11 +200,13 @@ func (s *Server) ensureMCPPython() {
 // every failure is logged and leaves the feature disabled instead of blocking
 // startup.
 func (s *Server) maybeStartMSF() {
+	// 依赖安装与 RPC 自动启动解耦：即使 RPC 用外部实例（AUTOSTART=0），
+	// 也仍然需要 mcp-pymetasploit3，否则闭环不可用。
+	go s.ensureMCPPython() // 首次启动自动补齐 mcp-pymetasploit3（ARTEX_MSF_AUTO_INSTALL=0 可关）
 	if !msfAutoStartEnabled() {
 		log.Printf("[msf] 自动启动已关闭（ARTEX_MSF_AUTOSTART）")
 		return
 	}
-	go s.ensureMCPPython() // 首次启动自动补齐 mcp-pymetasploit3（ARTEX_MSF_AUTO_INSTALL=0 可关）
 	port := 55553
 	if v := strings.TrimSpace(os.Getenv("ARTEX_MSF_RPC_PORT")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n < 65536 {
