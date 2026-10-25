@@ -447,7 +447,18 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 				got = waitNewSessions(ctx, sess, before, a.WaitSecs)
 				if len(got) > 0 {
 					act = msf.Next(plan, i, msf.OutcomeSession)
-					transcript = append(transcript, map[string]any{"step": "session", "ids": got})
+					// 自动取证：拿到会话后立刻执行一组只读命令，把证据随结果返回，
+					// 并写回 fact，闭合「利用→取证→写回」循环（不依赖模型再补一轮）。
+					evidence := ""
+					for _, sid := range got {
+						if ev := s.msfSessionEvidence(ctx, sess, sid); ev != "" {
+							evidence += fmt.Sprintf("[session %s]\n%s\n", sid, ev)
+						}
+					}
+					s.msfRecordSessionFact(ctx, plan, got[0], evidence)
+					transcript = append(transcript, map[string]any{
+						"step": "session", "ids": got, "evidence": truncateForTool(evidence),
+					})
 					break
 				}
 				act = msf.Next(plan, i, msf.OutcomeNoSession)
@@ -649,4 +660,65 @@ func consoleData(txt string) (string, bool) {
 		return txt, false
 	}
 	return v.Data, v.Busy
+}
+
+// msfSessionEvidence runs a read-only triage bundle in a fresh session and
+// returns its output. Failures are non-fatal: the session itself is the win.
+func (s *Server) msfSessionEvidence(ctx context.Context, sess *msfSession, id string) string {
+	cmd := "id 2>/dev/null; whoami; hostname; uname -a 2>/dev/null; (ip -brief addr 2>/dev/null || ifconfig 2>/dev/null)"
+	txt, err := sess.call(ctx, "session_run_command", map[string]any{
+		"session_id": id, "command": cmd, "timeout": 60, "timeout_exception": false,
+	})
+	if err != nil {
+		log.Printf("[msf] 会话 %s 取证失败：%v", id, err)
+		return ""
+	}
+	return sessionOutput(txt)
+}
+
+func sessionOutput(txt string) string {
+	var v struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal([]byte(txt), &v); err == nil && v.Output != "" {
+		return strings.TrimSpace(v.Output)
+	}
+	return strings.TrimSpace(txt)
+}
+
+// msfRecordSessionFact writes the session + evidence back to the exploration
+// graph so the loop is closed even if the model never emits a follow-up turn.
+func (s *Server) msfRecordSessionFact(ctx context.Context, plan msf.Plan, sessionID, evidence string) {
+	if s.m == nil || s.m.pg == nil {
+		return
+	}
+	ri := agent.RunInfoFrom(ctx)
+	if ri.TaskID <= 0 {
+		return
+	}
+	task, ok := s.m.Task(strconv.FormatInt(ri.TaskID, 10))
+	if !ok || task == nil || task.Store == nil {
+		return
+	}
+	host := ""
+	if len(plan.Candidates) > 0 {
+		host = plan.Candidates[0].Options["RHOSTS"]
+	}
+	if len(evidence) > 4000 {
+		evidence = evidence[:4000] + "…[截断]"
+	}
+	payload := map[string]any{
+		"summary":        fmt.Sprintf("MSF 会话建立：session %s（%s，目标 %s）", sessionID, plan.Class, host),
+		"evidence":       evidence,
+		"confidence":     "confirmed",
+		"msf_session_id": sessionID,
+		"msf_plan_id":    plan.PlanID,
+		"msf_host":       host,
+	}
+	if _, err := task.Store.AddNode(db.KindFact, payload, 0, "confirmed", "worker", nil); err != nil {
+		log.Printf("[msf] 写回会话 fact 失败：%v", err)
+		return
+	}
+	task.Notify()
+	log.Printf("[msf] 会话 %s 已写回 fact（任务 %d，%s）", sessionID, ri.TaskID, plan.Class)
 }

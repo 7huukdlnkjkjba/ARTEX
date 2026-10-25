@@ -149,10 +149,13 @@ Worker 拿到意图后：
 
 1. `msf_plan` 拿计划（或 planner 已给出 `vuln_class`）。
 2. `msf_execute` 自动跑；返回 `sessions` 非空即成功。
-3. 对每个 session 用 MCP 的 `session_run_command` 执行 `session_post` 取证命令。
-4. 把「模块 / 参数 / 结果 / session id / 权限 / 可达网段」写成 fact；
-   若拿到的是可交互 shell，登记 ARTEX 会话（`register_session`）或按 MSF 会话继续操作。
-5. 失败则按 `action.kind`（retry/degrade/stop）处理，**不要**原样重试同一候选。
+3. **拿到会话时 `msf_execute` 已自动取证**：对每个新会话执行
+   `id/whoami/hostname/uname/ip` 只读命令，并把输出随结果的 `transcript[].evidence` 返回。
+4. **自动写回 fact**：会话 id、类别、目标、取证输出写入探索图
+   （`confidence=confirmed`，带 `msf_session_id`/`msf_plan_id`），并唤醒 planner，
+   即使模型没有补发一轮也不会丢证据。
+5. 若拿到的是可交互 shell，登记 ARTEX 会话（`register_session`）或按 MSF 会话继续操作。
+6. 失败则按 `action.kind`（retry/degrade/stop）处理，**不要**原样重试同一候选。
 
 ## 5. 限制与注意事项
 
