@@ -164,6 +164,7 @@ func run() int {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+	srv.StopManagedMSF() // 回收受管 msfrpcd（外部复用的不动）
 	return code
 }
 

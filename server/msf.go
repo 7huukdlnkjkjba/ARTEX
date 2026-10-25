@@ -158,9 +158,12 @@ func msfPlanError(err error) (actool.Result, error) {
 // ---------------- MCP execution ----------------
 
 type msfSession struct {
-	client mcpClient
-	tools  map[string]actool.CoreTool
-	name   string
+	client    mcpClient
+	tools     map[string]actool.CoreTool
+	name      string
+	host      string
+	port      int
+	plaintext bool
 }
 
 func (m *msfSession) tool(name string) (actool.CoreTool, bool) {
@@ -228,7 +231,14 @@ func (s *Server) msfConnect(ctx context.Context) (*msfSession, error) {
 		}
 	}
 	if srv == nil {
-		return nil, fmt.Errorf("未找到启用的 metasploit MCP 服务：请在「系统 → MCP」启用内置项，或新建 stdio 服务 command=mcp-pymetasploit3")
+		// 无需 UI 配置：直接用内置启动器拉起 mcp-pymetasploit3（console 脚本或 python -m）。
+		cmd, args, ok := findMCPLauncher()
+		if !ok {
+			return nil, fmt.Errorf("未找到 mcp-pymetasploit3：请先 pip install mcp-pymetasploit3（或在「系统 → MCP」新建 stdio 服务）")
+		}
+		rawArgs, _ := json.Marshal(args)
+		srv = &db.MCPServer{Name: "metasploit", Transport: "stdio", Command: cmd, Args: rawArgs, Env: json.RawMessage("{}")}
+		log.Printf("[msf] 使用内置 MCP 配置拉起：%s %v", cmd, args)
 	}
 	c, err := connectMCP(ctx, srv)
 	if err != nil {
@@ -239,7 +249,9 @@ func (s *Server) msfConnect(ctx context.Context) (*msfSession, error) {
 		_ = c.Close()
 		return nil, fmt.Errorf("读取 metasploit MCP 工具失败：%w", err)
 	}
-	m := &msfSession{client: c, name: srv.Name, tools: map[string]actool.CoreTool{}}
+	host, port := s.msfRPCAddrPort()
+	m := &msfSession{client: c, name: srv.Name, tools: map[string]actool.CoreTool{}, host: host, port: port}
+	m.plaintext = s.msfRPC != nil && s.msfRPC.Plaintext()
 	for _, t := range tools {
 		m.tools[t.Name()] = t
 	}
@@ -267,8 +279,16 @@ func (m *msfSession) ensureRPC(ctx context.Context, password, mode string) (stri
 	}
 	var lastErr error
 	for _, ssl := range modes {
+		host := m.host
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		port := m.port
+		if port == 0 {
+			port = 55553
+		}
 		txt, err := m.call(ctx, "connect", map[string]any{
-			"password": password, "host": "127.0.0.1", "port": 55553, "ssl": ssl,
+			"password": password, "host": host, "port": port, "ssl": ssl,
 		})
 		if err == nil && (strings.Contains(txt, `"authenticated": true`) || strings.Contains(txt, `"status": "connected"`) || strings.Contains(txt, `"status":"connected"`)) {
 			return txt, nil
@@ -363,9 +383,19 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 			if pw == "" && s.m.pg != nil {
 				pw, _, _ = s.m.pg.GetSetting("msf_rpc_password")
 			}
+			if pw == "" && s.msfRPC != nil {
+				pw = s.msfRPC.Password()
+			}
 			sslMode := a.RPCSsl
 			if sslMode == "" {
 				sslMode = os.Getenv("ARTEX_MSF_RPC_SSL")
+			}
+			if sslMode == "" {
+				if sess.plaintext {
+					sslMode = "false" // 受管 msfrpcd 用 -S 启动（仅 loopback 明文）
+				} else {
+					sslMode = "auto"
+				}
 			}
 			if _, err := sess.ensureRPC(ctx, pw, sslMode); err != nil {
 				return actool.Errorf(err.Error()), nil

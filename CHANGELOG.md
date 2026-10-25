@@ -12,8 +12,13 @@
   永远得到同一 `plan_id` 与顺序，未收录类别返回 `search_modules` 检索建议（不猜模块名）。
 - **worker 三个工具**：`msf_plan`（只读决策）、`msf_next`（无状态分支选择：retry/degrade/session/stop）、
   `msf_execute`（连 metasploit MCP 自动跑候选链：use_module → set_option → execute → 轮询 list_sessions）。
-- **接入 mcp-pymetasploit3**：启动时种入 disabled 的 stdio MCP 配置（`metasploit` / `mcp-pymetasploit3`），
-  在「系统 → MCP」启用并授权工具可见性即可；RPC 密码支持入参 / `ARTEX_MSF_RPC_PASSWORD` / 设置项。
+- **零人工启动**：ARTEX 启动时自动拉起受管 `msfrpcd`（随机密码写 `settings.msf_rpc_password`，
+  仅 loopback 明文，退出时回收；`ARTEX_MSF_AUTOSTART=0` 可关），检测到外部 RPC 则复用。
+- **接入 mcp-pymetasploit3**：无需在 UI 配置——找不到启用的 MCP 行时用内置启动器
+  （`mcp-pymetasploit3` 或 `python -m mcp_pymetasploit3`）；仍保留种入的 disabled MCP 配置供手工管理。
+- **AI 自动触发**：验证器把漏洞置为 confirmed（或 UI 手动确认）时，`OnFindingConfirmed` →
+  `msfAutoKick` 写 hint 并唤醒 planner，自动派 worker 执行 `msf_plan` → `msf_execute`；
+  人只负责目标与授权范围。
 - **安全边界**：`msf_execute` 先对目标做任务 `task_scope` 硬校验，越界拒绝；只应在漏洞确认后调用，
   失败按分支表处理且禁止原样重试同一候选。
 - 文档：`MSF-CLOSED-LOOP.md`（安装、模块映射、分支语义、闭环用法）、`scripts/setup-msf-mcp.ps1`。

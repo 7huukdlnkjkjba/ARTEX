@@ -17,33 +17,38 @@
                                             Metasploit Framework
 ```
 
-## 1. 安装与接入
+## 1. 安装与接入（零人工，默认全自动）
 
-### 1.1 启动 Metasploit RPC
+### 1.1 Metasploit RPC：ARTEX 自己拉起
+
+**不需要手工执行 `msfrpcd`**。ARTEX 启动时会：
+
+1. 探测 `127.0.0.1:55553`；已有外部 msfrpcd 就直接复用（`managed=false`）。
+2. 没有则定位 `msfrpcd`（PATH / `METASPLOIT_ROOT` / `C:\metasploit-framework\bin`），
+   生成 32 位随机密码并写入 `settings.msf_rpc_password`，以
+   `msfrpcd -P <pw> -p 55553 -S -n -a 127.0.0.1` 启动（仅 loopback、明文）。
+3. 最多等 90s 等 RPC 就绪；失败只记日志，不阻塞 ARTEX 启动。
+4. ARTEX 退出时回收自己启动的进程（外部复用不动）。
+
+可用环境变量微调：`ARTEX_MSF_AUTOSTART=0` 关闭自动启动、`ARTEX_MSF_RPC_PORT` 改端口、
+`ARTEX_MSF_RPC_ADDR` 改地址、`ARTEX_MSF_RPC_PASSWORD` 指定密码。
+
+### 1.2 MCP 服务：不需要在 UI 里配置
+
+唯一的前置是 Python 包：
 
 ```bash
-msfrpcd -P '<rpc-password>' -p 55553 -n
-# 或者：msfconsole -q -x 'load msgrpc Pass=<rpc-password> ServerPort=55553'
+pip install mcp-pymetasploit3
 ```
 
-### 1.2 安装 MCP 服务
+ARTEX 启动时会种入一条 disabled 的 `metasploit` MCP 配置；但 `msf_execute` **不依赖它**：
+找不到启用的 MCP 行时，会直接用内置启动器拉起 `mcp-pymetasploit3`（console 脚本优先，
+否则 `python -m mcp_pymetasploit3`）。所以无需「系统 → MCP」启用、也无需给 worker
+授权 MCP 工具可见性——闭环工具是 ARTEX 的 host 工具（`msf_plan`/`msf_next`/`msf_execute`），
+内部直接调用 MCP。
 
-```bash
-pip install mcp-pymetasploit3          # 或 uv tool install mcp-pymetasploit3
-```
-
-ARTEX 启动时会自动种入一条 **disabled** 的 MCP 配置：
-
-| name | transport | command | 说明 |
-|---|---|---|---|
-| `metasploit` | stdio | `mcp-pymetasploit3` | 需在「系统 → MCP」手动启用 |
-
-如果你的环境里命令不在 PATH（Windows 常见），把 command 改成
-`python`、args 改成 `["-m","mcp_pymetasploit3"]`，或写成 venv 的绝对路径。
-
-启用后点「发现工具」，确认能看到 `search_modules` / `use_module` / `set_module_option` /
-`execute_module` / `list_sessions` / `session_run_command` 等；并在**工具可见性**里把它们
-授权给 `worker`（MCP 工具默认不继承 host 工具绑定）。
+> 如果确实想用「系统 → MCP」统一管理/看工具，也可以在那里启用内置 `metasploit`；
+> 两种方式等价，内置启动器只是兜底。
 
 ### 1.3 RPC 密码
 
@@ -51,9 +56,24 @@ ARTEX 启动时会自动种入一条 **disabled** 的 MCP 配置：
 
 1. 入参 `rpc_password`
 2. 环境变量 `ARTEX_MSF_RPC_PASSWORD`
-3. 设置项 `msf_rpc_password`（`INSERT INTO settings(key,value) VALUES('msf_rpc_password','...') ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value;`）
+3. 设置项 `msf_rpc_password`（自动启动时生成并写入）
+4. 受管进程内存中的密码
 
 密码不会写进日志；MCP 的 `connect` 调用只在首次连接时发生。
+
+### 1.4 全自动触发（AI 自己开始）
+
+不需要人去点「确认漏洞」再手动派单：
+
+- 验证器（`record_finding_check_result` → `verified`）把漏洞置为 confirmed 时，
+  服务端回调 `OnFindingConfirmed` → `msfAutoKick`。
+- 人工在 UI 把漏洞状态改为 confirmed 也会触发同一逻辑。
+- `msfAutoKick` 会往探索图写一条 hint（类别、目标、执行纪律）并唤醒 planner；
+  planner 按正常流程派 worker 意图，worker 调 `msf_plan` → `msf_execute`，
+  拿到 session 后按 `session_post` 取证并写回 fact。
+
+也就是说：**人只需要给目标与授权范围，剩下由 planner/worker 的 AI 闭环完成**。
+`msf_execute` 仍是 host 工具（不是 MCP 工具透传），所有结果都进 transcript/fact，可审计。
 
 ## 2. 决策层（`msf/`）
 
@@ -122,7 +142,10 @@ ssh/mysql/mssql/smb 口令类。
 - 每轮默认最多试 3 个候选（上限 8），等待会话默认 25s（上限 120s）。
 - 执行结果（含失败）应写回 fact，形成「尝试过什么」的可审计链路，避免 planner 重复派单。
 
-## 4. Worker 闭环用法
+## 4. Worker 闭环用法（AI 自动执行，无人工步骤）
+
+触发由系统完成（验证器确认漏洞 → msfAutoKick → 唤醒 planner → 派 worker 意图）。
+Worker 拿到意图后：
 
 1. `msf_plan` 拿计划（或 planner 已给出 `vuln_class`）。
 2. `msf_execute` 自动跑；返回 `sessions` 非空即成功。

@@ -91,11 +91,14 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
   同一输入永远得到同一 `plan_id` 与同一顺序，未收录的类别返回 `search_modules` 检索建议而不是猜模块。
 - **执行层**：`msf_plan`（只读）→ `msf_execute`（连 MCP，use_module → 设参 → execute → 轮询 `list_sessions`，
   无会话自动切下一候选）→ 拿到 session 后按 `session_post` 取证并写回 fact。
-- **边界**：`msf_execute` 先做任务 scope 硬校验（越界拒绝），只应在漏洞确认后使用；失败按
+- **全自动**：ARTEX 启动时自动拉起受管 msfrpcd（随机密码、仅 loopback，退出时回收）；
+  MCP 无需在 UI 配置（内置启动器兜底）；验证器确认漏洞后自动唤醒 planner 派单。
+  人只负责给目标与授权范围。
+- **边界**：`msf_execute` 先做任务 scope 硬校验（越界拒绝）；失败按
   `msf_next` 的 retry / degrade / stop 处理，禁止原样重试同一候选。
 
-安装（msfrpcd、`pip install mcp-pymetasploit3`、系统→MCP 启用内置 `metasploit`、工具可见性授权给
-worker、RPC 密码）与模块映射表见 [MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)，Windows 可用
+前置只有一个：`pip install mcp-pymetasploit3`（Metasploit 已安装时无需手工启动 msfrpcd）。
+模块映射、分支语义与环境变量见 [MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)，Windows 可用
 [scripts/setup-msf-mcp.ps1](scripts/setup-msf-mcp.ps1) 做预检。
 
 ---

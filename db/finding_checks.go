@@ -194,6 +194,12 @@ func (d *DB) RecordFindingCheckResult(ctx context.Context, conversationID int64,
 //	verified       → findings.status='confirmed'
 //	false_positive → findings.status='false_positive' + 探索节点 state→'dismissed'
 //	inconclusive   → 不改状态,留人工
+//
+// OnFindingConfirmed is invoked after a verifier marks a finding confirmed (in
+// the same process, after the transaction commits). The server wires it to the
+// Metasploit auto-kick so the exploit loop starts without human triage.
+var OnFindingConfirmed func(findingID int64)
+
 func (d *DB) FinishFindingCheck(id int64, status, reason string) error {
 	if status != "completed" && status != "failed" && status != "stopped" {
 		return errors.New("invalid terminal check status")
@@ -226,10 +232,15 @@ func (d *DB) FinishFindingCheck(id int64, status, reason string) error {
 	if finalStatus != "completed" {
 		return tx.Commit()
 	}
+	var confirmedID int64
 	switch verdict {
 	case "verified":
-		if _, err := tx.Exec(`UPDATE findings SET status=$1 WHERE id=$2 AND status='pending'`, FindingConfirmed, findingID); err != nil {
+		res, err := tx.Exec(`UPDATE findings SET status=$1 WHERE id=$2 AND status='pending'`, FindingConfirmed, findingID)
+		if err != nil {
 			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			confirmedID = findingID
 		}
 	case "false_positive":
 		var nodeID *int64
@@ -246,7 +257,13 @@ func (d *DB) FinishFindingCheck(id int64, status, reason string) error {
 			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if confirmedID > 0 && OnFindingConfirmed != nil {
+		OnFindingConfirmed(confirmedID)
+	}
+	return nil
 }
 
 func (d *DB) RecoverFindingChecks() error {
