@@ -66,16 +66,16 @@ type Branch struct {
 
 // Plan is the complete, deterministic decision result.
 type Plan struct {
-	PlanID        string      `json:"plan_id"`
-	Kind          string      `json:"kind"` // exploit | search
-	Class         string      `json:"class"`
-	Summary       string      `json:"summary"`
-	Candidates    []Candidate `json:"candidates"`
-	Preconditions []string    `json:"preconditions"`
-	Branches      []Branch    `json:"branches"`
-	SessionPost   []string    `json:"session_post,omitempty"`
-	SuggestedSearch string    `json:"suggested_search,omitempty"`
-	Warnings      []string    `json:"warnings,omitempty"`
+	PlanID          string      `json:"plan_id"`
+	Kind            string      `json:"kind"` // exploit | search
+	Class           string      `json:"class"`
+	Summary         string      `json:"summary"`
+	Candidates      []Candidate `json:"candidates"`
+	Preconditions   []string    `json:"preconditions"`
+	Branches        []Branch    `json:"branches"`
+	SessionPost     []string    `json:"session_post,omitempty"`
+	SuggestedSearch string      `json:"suggested_search,omitempty"`
+	Warnings        []string    `json:"warnings,omitempty"`
 }
 
 // Action is the next step Next returns.
@@ -490,7 +490,7 @@ func Next(p Plan, idx int, out Outcome) Action {
 				Kind:           "retry",
 				CandidateIndex: idx + 1,
 				Candidate:      &c,
-				Message: fmt.Sprintf("%s；切换到候选 #%d %s", reason, c.Order, c.Module),
+				Message:        fmt.Sprintf("%s；切换到候选 #%d %s", reason, c.Order, c.Module),
 			}
 		}
 		return Action{

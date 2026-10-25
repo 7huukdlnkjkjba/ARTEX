@@ -428,13 +428,13 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 				after = parseSessionIDs(txt)
 			}
 			return jsonResult(map[string]any{
-				"plan_id":       plan.PlanID,
-				"attempted":     attempted,
-				"sessions":      got,
-				"all_sessions":  keysOf(after),
-				"action":        act,
-				"transcript":    transcript,
-				"note":          "拿到 session 后先按 action.post_steps 取证，再写回 fact；没有会话按 action 处理（retry/degrade/stop），不要重复同一候选。",
+				"plan_id":      plan.PlanID,
+				"attempted":    attempted,
+				"sessions":     got,
+				"all_sessions": keysOf(after),
+				"action":       act,
+				"transcript":   transcript,
+				"note":         "拿到 session 后先按 action.post_steps 取证，再写回 fact；没有会话按 action 处理（retry/degrade/stop），不要重复同一候选。",
 			})
 		},
 	})

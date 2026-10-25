@@ -8,13 +8,13 @@ import (
 
 func TestNormalizeClass(t *testing.T) {
 	cases := map[string]string{
-		"Apache Struts2 S2-045": "struts2",
+		"Apache Struts2 S2-045":      "struts2",
 		"log4shell (CVE-2021-44228)": "log4j",
-		"WebLogic 未授权 RCE":        "weblogic",
-		"MS17-010 EternalBlue":      "eternalblue",
-		"redis 未授权访问":              "redis",
-		"Tomcat CVE-2017-12615":     "tomcat",
-		"unknown-thing":             "",
+		"WebLogic 未授权 RCE":           "weblogic",
+		"MS17-010 EternalBlue":       "eternalblue",
+		"redis 未授权访问":                "redis",
+		"Tomcat CVE-2017-12615":      "tomcat",
+		"unknown-thing":              "",
 	}
 	for in, want := range cases {
 		if got := NormalizeClass(in); got != want {
