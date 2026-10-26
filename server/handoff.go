@@ -6,6 +6,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -89,6 +90,11 @@ func (s *Server) sessionHandoff(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, fmt.Sprintf("会话 %d 不存在", id))
 		return
 	}
+	if rec.Status != db.SessionAlive {
+		// 死会话/待确认会话不能作为立足点：否则子任务会从一个不存在的通道开局。
+		writeErr(w, 409, fmt.Sprintf("会话 %d 当前状态为 %s，只有 alive 会话可以移交", id, rec.Status))
+		return
+	}
 	srcTask, ok := s.m.Task(strconv.FormatInt(rec.CreatedByTask, 10))
 	if rec.CreatedByTask <= 0 || !ok {
 		writeErr(w, 404, fmt.Sprintf("会话 %d 的来源任务 #%d 不存在", id, rec.CreatedByTask))
@@ -131,6 +137,11 @@ func (s *Server) sessionHandoff(w http.ResponseWriter, r *http.Request) {
 		// 初始 scope 只登记立足点主机 /32(人工来源;guard 现查 scope,即时生效)。
 		if _, e := as.AddAgentScope(newID, "ip", hostIP,
 			fmt.Sprintf("handoff 立足点(session #%d)", rec.ID), "manual"); e != nil {
+			// 任务已落库但还没 launchTask：回滚删除，否则会留下一个永远不启动、
+			// 也没有任何 scope 的孤儿任务。
+			if _, derr := s.m.DeleteTask(t.ID, DeleteTaskOptions{}); derr != nil {
+				log.Printf("[handoff] 登记 scope 失败后回滚任务 %s 失败: %v", t.ID, derr)
+			}
 			writeErr(w, 500, "登记立足点 scope 失败: "+e.Error())
 			return
 		}

@@ -41,6 +41,19 @@ const (
 	startupProbeMaxConc    = 8
 )
 
+// 运行期心跳参数：启动探活只覆盖「重启时已陈旧」的会话，空闲期死掉的会话仍会
+// 长期显示 alive。心跳每 sessionHeartbeatInterval 扫一次，只探 last_beat 超过
+// sessionHeartbeatIdle 的 alive 会话（正在使用的会话不额外打扰），单会话超时
+// sessionHeartbeatTimeout，每轮预算 sessionHeartbeatBudget、并发上限
+// sessionHeartbeatMaxConc。
+const (
+	sessionHeartbeatInterval = 2 * time.Minute
+	sessionHeartbeatIdle     = 10 * time.Minute
+	sessionHeartbeatTimeout  = 8 * time.Second
+	sessionHeartbeatBudget   = 45 * time.Second
+	sessionHeartbeatMaxConc  = 4
+)
+
 // sessionNeedsStartupProbe 是启动探活的阈值判定（纯函数，可测）:
 // alive 且 last_beat 距今超过 age 才需要探活；恰好在边界上不算陈旧。
 func sessionNeedsStartupProbe(rec *db.SessionRecord, now time.Time, age time.Duration) bool {
@@ -95,6 +108,8 @@ func (s *Server) initSessions() {
 	// 启动卫生：对陈旧（last_beat 超 24h)alive 会话异步探活，失败诚实标 dead。
 	// 异步执行不拖启动；整体预算 60s 内完成。
 	go s.startupProbeStale(recs)
+	// 运行期心跳：空闲会话也会被定期探活，死了标 dead，不再等下次使用或重启。
+	go s.sessionHeartbeatLoop()
 }
 
 // startupProbeStale 对陈旧 alive 会话并发探活：成功刷新 last_beat（状态归
@@ -145,6 +160,80 @@ func (s *Server) startupProbeStale(recs []*db.SessionRecord) {
 		log.Printf("[session] 启动探活：%d 活 %d 死（共探 %d 条陈旧会话）",
 			aliveN.Load(), deadN.Load(), probed)
 	}
+}
+
+// sessionNeedsHeartbeat 是运行期心跳的阈值判定（纯函数，可测）：只有 alive 且
+// last_beat 距 now 超过 idle 的会话才探——正在被使用的会话不额外打扰。
+func sessionNeedsHeartbeat(rec *db.SessionRecord, now time.Time, idle time.Duration) bool {
+	return rec != nil && rec.Status == db.SessionAlive && now.Sub(rec.LastBeat) > idle
+}
+
+// sessionHeartbeatLoop 是运行期周期心跳：每 sessionHeartbeatInterval 扫一次
+// alive 会话，探测空闲（last_beat 超过 sessionHeartbeatIdle）且仍在注册表里的
+// 会话——注册表里没有驱动的行（reverse 由 penelope syncLoop 负责、恢复失败的
+// 行）直接跳过，不误标死。
+func (s *Server) sessionHeartbeatLoop() {
+	t := time.NewTicker(sessionHeartbeatInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-t.C:
+			s.sessionHeartbeatRound()
+		}
+	}
+}
+
+// sessionHeartbeatRound 探活一轮空闲会话。成功刷 last_beat 并确保状态为 alive，
+// 失败诚实标 dead。整轮有预算上限：预算耗尽导致的取消不算会话死亡。
+func (s *Server) sessionHeartbeatRound() {
+	if s.sessStore == nil || s.sessReg == nil {
+		return
+	}
+	recs, err := s.sessStore.List(s.ctx, db.SessionAlive)
+	if err != nil {
+		log.Printf("[session] 心跳读取台账失败：%v", err)
+		return
+	}
+	now := time.Now()
+	ctx, cancel := context.WithTimeout(s.ctx, sessionHeartbeatBudget)
+	defer cancel()
+	sem := make(chan struct{}, sessionHeartbeatMaxConc)
+	var wg sync.WaitGroup
+	for _, rec := range recs {
+		if !sessionNeedsHeartbeat(rec, now, sessionHeartbeatIdle) {
+			continue // 最近用过，不打扰
+		}
+		sess, ok := s.sessReg.Get(rec.ID)
+		if !ok {
+			continue // 无驱动的行（reverse/恢复失败）不归心跳管
+		}
+		wg.Add(1)
+		go func(id int64, sess session.Session) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			pctx, pcancel := context.WithTimeout(ctx, sessionHeartbeatTimeout)
+			probeErr := sess.Test(pctx)
+			pcancel()
+			if ctx.Err() != nil {
+				return // 整轮预算/停机取消，不能据此判定会话死亡
+			}
+			dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer dcancel()
+			if probeErr != nil {
+				log.Printf("[session] 心跳：会话 %d 探活失败，标 dead：%v", id, probeErr)
+				if uerr := s.sessStore.UpdateStatus(dctx, id, db.SessionDead); uerr != nil {
+					log.Printf("[session] 心跳：会话 %d 标 dead 落库失败：%v", id, uerr)
+				}
+				return
+			}
+			_ = s.sessStore.UpdateStatus(dctx, id, db.SessionAlive)
+			s.sessStore.Touch(dctx, id)
+		}(rec.ID, sess)
+	}
+	wg.Wait()
 }
 
 // sessionRoECheck 在登记会话前校验目标 URL 的 host 是否在本任务 RoE 范围内：

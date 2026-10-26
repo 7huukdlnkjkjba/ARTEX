@@ -13,6 +13,15 @@
 - **补齐验证器触发路径**：`db.FinishFindingCheck` 判 `verified` 置 confirmed 后调用
   `OnFindingConfirmed`，但该回调此前只在 UI 手动确认路径生效（服务端从未赋值）。现于
   `server.New` 挂接 `msfAutoKick`，两条确认入口行为一致。
+- **修复会话移交（handoff）的两个缺陷**：① 移交前校验会话状态，只有 `alive` 可移交，
+  死会话返回 409；② 子任务建好但登记立足点 scope 失败时回滚删除该任务，不再留下
+  永远不启动、没有范围的孤儿任务。
+- **会话运行期心跳**：新增每 2 分钟的巡检，对 `last_beat` 超过 10 分钟的空闲 alive
+  会话探活（并发 4、单会话 8s、整轮 45s 预算）；失败诚实标 `dead`，成功刷新
+  `last_beat`。此前只有启动时对超 24h 的会话探活，空闲期死掉的会话会长期显示 alive。
+- **终态任务的 MSF 意图自动复活**：漏洞确认时任务已 done/failed/timeout，`msfAutoKick`
+  写完意图后会走 `reviveTask` 复活任务（与 set_goals 同一条 admission 路径），
+  不再需要人工点「继续」。
 
 ## [0.3.18] - 2026-10-25
 

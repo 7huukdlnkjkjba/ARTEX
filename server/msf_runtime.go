@@ -426,6 +426,12 @@ func (s *Server) msfAutoKick(ctx context.Context, findingID int64) {
 	}, 0, "confirmed", "system", nil); err != nil {
 		log.Printf("[msf] 写入派发提示失败：%v", err)
 	}
+	// 任务已终态时引擎不领新意图：先复活（与 set_goals 同一条 admission 路径），
+	// 否则这条意图会一直躺在 frontier 里，直到有人手动点「继续」。
+	if isTerminalStatus(s.m.TaskStatus(task.ID)) {
+		log.Printf("[msf] 任务 %s 已终态，复活以执行利用意图 #%d", task.ID, intentID)
+		s.reviveTask(task)
+	}
 	task.Notify()
 	log.Printf("[msf] 已为确认漏洞 #%d（%s）派发利用意图 #%d：%s", f.ID, class, intentID, target)
 }
