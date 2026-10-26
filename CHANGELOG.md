@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### 修改的功能
+
+- **漏洞确认后直接下发 MSF 利用意图**：`msfAutoKick` 不再只写一条 hint 等 planner 派单，
+  而是直接向 frontier 写高优先级意图（origin=`msf`，锚定漏洞节点与资产，summary 自带
+  `msf_plan`/`msf_execute`/失败分支说明），worker 池可立即领取；同一漏洞已有 open/running
+  利用意图时跳过，写意图失败退回 hint 路径，不静默丢闭环。
+- **补齐验证器触发路径**：`db.FinishFindingCheck` 判 `verified` 置 confirmed 后调用
+  `OnFindingConfirmed`，但该回调此前只在 UI 手动确认路径生效（服务端从未赋值）。现于
+  `server.New` 挂接 `msfAutoKick`，两条确认入口行为一致。
+
 ## [0.3.18] - 2026-10-25
 
 ### Metasploit 全自动闭环

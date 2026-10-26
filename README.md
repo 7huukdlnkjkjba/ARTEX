@@ -100,10 +100,10 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - **决策层**（`msf/`，纯函数）：漏洞类别/目标 → 确定性候选模块、参数、前置条件、失败分支；
   同一输入永远得到同一 `plan_id` 与同一顺序，未收录的类别返回 `search_modules` 检索建议而不是猜模块。
 - **执行层**：`msf_plan`（只读）→ `msf_execute`（连 MCP，use_module → 设参 → execute → 轮询 `list_sessions`，
-  无会话自动切下一候选）→ 拿到 session 后按 `session_post` 取证并写回 fact。
+  无会话自动切下一候选）→ 拿到 session 后自动采集证据并写回 fact。
 - **全自动**：ARTEX 启动时自动拉起受管 msfrpcd（随机密码、仅 loopback，退出时回收）；
-  MCP 无需在 UI 配置（内置启动器兜底）；验证器确认漏洞后自动唤醒 planner 派单。
-  人只负责给目标与授权范围。
+  MCP 无需在 UI 配置（内置启动器兜底）；漏洞确认后直接下发高优先级利用意图给 worker 池
+  （验证器与 UI 手动确认两条入口一致），不再依赖下一轮 planner 派单。人只负责给目标与授权范围。
 - **边界**：`msf_execute` 先做任务 scope 硬校验（越界拒绝）；失败按
   `msf_next` 的 retry / degrade / stop 处理，禁止原样重试同一候选。
 

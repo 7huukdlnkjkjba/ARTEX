@@ -75,9 +75,11 @@ ARTEX 启动时会种入一条 disabled 的 `metasploit` MCP 配置；但 `msf_e
 - 验证器（`record_finding_check_result` → `verified`）把漏洞置为 confirmed 时，
   服务端回调 `OnFindingConfirmed` → `msfAutoKick`。
 - 人工在 UI 把漏洞状态改为 confirmed 也会触发同一逻辑。
-- `msfAutoKick` 会往探索图写一条 hint（类别、目标、执行纪律）并唤醒 planner；
-  planner 按正常流程派 worker 意图，worker 调 `msf_plan` → `msf_execute`，
-  拿到 session 后按 `session_post` 取证并写回 fact。
+- `msfAutoKick` 直接向 frontier 下发一条高优先级意图（origin=`msf`，锚定漏洞节点与资产，
+  summary 自带类别、目标与执行纪律），worker 池会直接领取，不再依赖下一轮 planner 派单；
+  同时写一条 hint 告知 planner「已派发、勿重复」。同一漏洞已有 open/running 的利用意图
+  时跳过；写意图失败则退回 hint 路径，不会静默丢掉闭环。
+- worker 调 `msf_plan` → `msf_execute`；`msf_execute` 拿到 session 后自动采集证据并写回 fact。
 
 也就是说：**人只需要给目标与授权范围，剩下由 planner/worker 的 AI 闭环完成**。
 `msf_execute` 仍是 host 工具（不是 MCP 工具透传），所有结果都进 transcript/fact，可审计。
@@ -126,7 +128,7 @@ ssh/mysql/mssql/smb 口令类。
 
 | 观察结果 | 动作 | 语义 |
 |---|---|---|
-| `session` | `session` | 拿到会话 → 按 `session_post` 取证并写回 |
+| `session` | `session` | 拿到会话 → `msf_execute` 已自动取证并写回 fact |
 | `module_missing` | `retry` | 当前 MSF 没有该模块 → 下一候选 |
 | `precheck_failed` | `degrade` | 前置条件不满足 → 转 check/辅助验证，写否定 fact |
 | `no_session` | `retry` | 模块跑完无会话 → 下一候选（换利用面/payload） |
@@ -151,7 +153,7 @@ ssh/mysql/mssql/smb 口令类。
 
 ## 4. Worker 闭环用法（AI 自动执行，无人工步骤）
 
-触发由系统完成（验证器确认漏洞 → msfAutoKick → 唤醒 planner → 派 worker 意图）。
+触发由系统完成（验证器/UI 确认漏洞 → `msfAutoKick` → 直接下发 worker 意图，详见 §1.4）。
 Worker 拿到意图后：
 
 1. `msf_plan` 拿计划（或 planner 已给出 `vuln_class`）。

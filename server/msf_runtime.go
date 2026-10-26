@@ -334,8 +334,10 @@ func (s *Server) msfRPCAddrPort() (string, int) {
 	return msfRPCAddress(), 55553
 }
 
-// msfAutoKick wakes the planner with a hint when a finding is confirmed and its
-// class has a deterministic Metasploit path, so the loop starts without a human.
+// msfAutoKick dispatches a high-priority exploit intent when a finding is
+// confirmed and its class has a deterministic Metasploit path, so the loop starts
+// without a human and without waiting for a planner round. A hint is still written
+// to tell the planner the intent is already in the frontier.
 func (s *Server) msfAutoKick(ctx context.Context, findingID int64) {
 	if s.m == nil || s.m.pg == nil {
 		return
@@ -384,21 +386,71 @@ func (s *Server) msfAutoKick(ctx context.Context, findingID int64) {
 	if port > 0 {
 		target = fmt.Sprintf("%s:%d", host, port)
 	}
-	text := fmt.Sprintf(
-		"已确认漏洞 #%d（%s，类别 %s）命中 Metasploit 确定性利用路径，目标 %s。"+
-			"请优先派一条意图：worker 先 msf_plan 拿候选链，再 msf_execute 自动执行（MCP 由平台托管，无需人启动）；"+
-			"拿到 session 后按 session_post 取证并写回 fact；失败按返回的 action（retry/degrade/stop）处理。",
-		f.ID, f.Name, class, target)
-	if _, err := task.Store.AddNode(db.KindHint, map[string]any{
-		"summary": "MSF 自动利用可用：" + target,
-		"text":    text,
-		"auto":    "msf",
-	}, 0, "confirmed", "system", nil); err != nil {
-		log.Printf("[msf] 写入自动利用提示失败：%v", err)
+	// 直接下发一条高优先级意图，而不是只给 planner 留提示：worker 池只从 frontier
+	// 领取 open 意图，写进意图流后就不再依赖下一轮 planner 愿不愿意派单。
+	// 同一漏洞已有 open/running 的利用意图时跳过，避免重复确认或重试造成扇出。
+	if active, err := task.Store.HasActiveIntentForFinding(f.ID); err != nil {
+		log.Printf("[msf] 检查漏洞 #%d 的既有利用意图失败：%v", f.ID, err)
+	} else if active {
+		log.Printf("[msf] 漏洞 #%d 已有未完成的利用意图，跳过重复派发", f.ID)
 		return
 	}
+	intentID, err := task.Store.AddIntent(msfIntentPayload(f, class, target), 8, f.AssetIDs, "msf")
+	if err != nil {
+		log.Printf("[msf] 为确认漏洞 #%d 写入利用意图失败：%v", f.ID, err)
+		// 写意图失败（DB 抖动等）时退回提示路径：至少让 planner 下一轮能看到并自行派单，
+		// 不能因为自动派发失败把整条利用闭环静默丢掉。
+		if _, hintErr := task.Store.AddNode(db.KindHint, map[string]any{
+			"summary": "MSF 自动利用可用：" + target,
+			"text": fmt.Sprintf("已确认漏洞 #%d（%s，类别 %s）命中 Metasploit 确定性利用路径，目标 %s。"+
+				"自动派发意图失败，请手动派一条：worker 先 msf_plan 拿候选链，再 msf_execute 执行。"+
+				"拿到 session 后按返回的取证结果写回 fact；失败按 msf_next 的 retry/degrade/stop 处理。",
+				f.ID, f.Name, class, target),
+			"auto": "msf",
+		}, 0, "confirmed", "system", nil); hintErr != nil {
+			log.Printf("[msf] 退回提示路径也失败：%v", hintErr)
+			return
+		}
+		task.Notify()
+		return
+	}
+	// 意图挂在漏洞节点下，保持"意图只能锚在已确认 fact/finding 上"的血缘约束。
+	if f.NodeID != nil {
+		_ = task.Store.Link(*f.NodeID, db.RelDerivedFrom, intentID)
+	}
+	if _, err := task.Store.AddNode(db.KindHint, map[string]any{
+		"summary": "MSF 自动利用已派发：" + target,
+		"text": fmt.Sprintf("已自动派发 Metasploit 利用意图 #%d（漏洞 #%d，%s，目标 %s）。"+
+			"该意图已在 frontier，worker 会直接领取；不要为同一漏洞重复派单。", intentID, f.ID, class, target),
+		"auto": "msf",
+	}, 0, "confirmed", "system", nil); err != nil {
+		log.Printf("[msf] 写入派发提示失败：%v", err)
+	}
 	task.Notify()
-	log.Printf("[msf] 已为确认漏洞 #%d（%s）唤醒 planner：%s", f.ID, class, target)
+	log.Printf("[msf] 已为确认漏洞 #%d（%s）派发利用意图 #%d：%s", f.ID, class, intentID, target)
+}
+
+// msfIntentPayload builds the frontier intent for one confirmed finding. The
+// summary must be self-contained: the worker may claim this intent without any
+// planner round in between, so the intent itself has to say which tools to call
+// and how to branch on failure.
+func msfIntentPayload(f *db.DBFinding, class, target string) map[string]any {
+	name := f.Name
+	if name == "" {
+		name = f.VulnClass
+	}
+	summary := fmt.Sprintf(
+		"利用已确认漏洞 #%d「%s」（类别 %s，目标 %s）：先调用 msf_plan 取确定性候选链，再用 msf_execute 执行"+
+			"（MCP 由平台托管，无需人启动）；msf_execute 拿到会话会自动采集证据并写回 fact，你只需核对结果并继续。"+
+			"无会话或失败时按 msf_next 返回的 retry/degrade/stop 分支处理，禁止原样重试同一候选。",
+		f.ID, name, class, target)
+	return map[string]any{
+		"summary":        summary,
+		"action":         "msf_exploit",
+		"msf_finding_id": f.ID,
+		"msf_target":     target,
+		"msf_class":      class,
+	}
 }
 
 // StopManagedMSF terminates the msfrpcd process ARTEX started (no-op when we

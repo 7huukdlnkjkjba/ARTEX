@@ -164,8 +164,13 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	s.initSideQuestions()
-	s.initStage(dataDir)        // 受管文件投递暂存(F13);失败降级为关闭,不影响启动
-	s.maybeStartMSF()           // Metasploit 闭环:自动确保 msfrpcd 可用(ARTEX_MSF_AUTOSTART=0 关闭)
+	s.initStage(dataDir) // 受管文件投递暂存(F13);失败降级为关闭,不影响启动
+	s.maybeStartMSF()    // Metasploit 闭环:自动确保 msfrpcd 可用(ARTEX_MSF_AUTOSTART=0 关闭)
+	// 验证器把漏洞置为 confirmed 时走 db.FinishFindingCheck,与 UI 手动确认是两条
+	// 独立入口;这里挂上回调,让两条路都能唤醒 planner 派 MSF 利用意图。
+	db.OnFindingConfirmed = func(id int64) {
+		go s.msfAutoKick(context.Background(), id)
+	}
 	checkToolsManifest(dataDir) // 期 6 外部工具清单自检(缺失常态,只打汇总日志)
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。

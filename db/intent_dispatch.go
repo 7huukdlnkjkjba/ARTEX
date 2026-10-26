@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 )
 
 // 本文件是意图调度的 db 支撑(红日 3 复盘 R2):
@@ -13,9 +14,9 @@ import (
 //     cancel_intent 工具)。与 CancelIntent(删 running/paused 及其产出)不同:
 //     open 意图尚无 worker、无产出,只需状态落 stopped + 把作废原因挂图留痕,
 //     语义对齐 StopIntentWithReason 的「不销毁数据」原则。
+//   - HasActiveIntentForFinding:MSF 自动派发前的去重查询——同一漏洞只保留一条
+//     open/running 的利用意图,避免重复确认或重试把 frontier 刷成一堆同目标意图。
 
-// CountOpenIntents returns the number of this exploration's intents still in
-// state 'open' (the frontier backlog size). Parameterized; no row materialization.
 // CancelOpenIntent voids ONE open intent: open → stopped, WITHOUT deleting it.
 // The intent never started, so there are no yielded facts/findings/activities to
 // clean up (that is CancelIntent's job for running/paused intents). The void
@@ -76,4 +77,19 @@ ON CONFLICT DO NOTHING`, s.expID, id, RelYields, factID); err != nil {
 		return 0, err
 	}
 	return factID, tx.Commit()
+}
+
+// HasActiveIntentForFinding reports whether an MSF exploit intent for this finding
+// is still in play (open or running). The auto-kick writes one intent per confirmed
+// finding; a repeated confirmation, a manual re-triage, or an overlapping kick must
+// not fan out duplicates into the frontier.
+func (s *ExplorationStore) HasActiveIntentForFinding(findingID int64) (bool, error) {
+	if findingID <= 0 {
+		return false, nil
+	}
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running')
+AND payload->>'msf_finding_id' = $2)`, s.expID, strconv.FormatInt(findingID, 10)).Scan(&exists)
+	return exists, err
 }

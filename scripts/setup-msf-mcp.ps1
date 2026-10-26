@@ -43,7 +43,7 @@ Write-Host "== 3/3 ARTEX 侧配置 ==" -ForegroundColor Cyan
    - 环境变量 ARTEX_MSF_RPC_PASSWORD=$RpcPassword
    - 设置项：INSERT INTO settings(key,value) VALUES('msf_rpc_password','$RpcPassword')
              ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value;
-5) 回到任务，worker 依次调用：msf_plan → msf_execute → 按 session_post 取证 → 写回 fact。
+5) 回到任务，worker 依次调用：msf_plan → msf_execute（拿到会话自动取证并写回 fact）。
 "@ | Write-Host
 
 if (-not $RpcPassword) {
