@@ -16,7 +16,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 |---|---|
 | **v0.3.16** | **deepseek-hermes省钱代码（成本控制）**：单次会话默认 ¥6 封顶，缓存命中按 ¥0.5/M 单独计价、不与输入重复计费，预算余额写进 planner/worker 提示词逼模型收敛，任务详情显示 `≈¥已用 / 上限` |
 | **v0.3.17** | 并入artex-ymh能力「外网突破 → 立足点 → 内网纵深」：webshell 会话、penelope 反弹、`session_recon`、suo5/chisel 隧道、内网拓扑、凭据库、待授权网段、任务移交、伪装门控、一键放行、RoE 三态、蜜罐识别、chains 技能、`artex doctor` |
-| **v0.3.18** | Metasploit **全自动闭环**：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、漏洞确认后自动派单、会话自动取证并写回 fact；闭环依赖**自动安装**（首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`，可关、可指定解释器） |
+| **v0.3.18** | Metasploit **全自动闭环**（**端到端已验证 2026-10-27**）：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、确认后自动派单、会话自动取证并写回 fact；闭环依赖**自动安装**（首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`，可关、可指定解释器） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -97,17 +97,53 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ## Metasploit 全自动闭环（msf）
 
-对接 [mcp-pymetasploit3](https://github.com/daedalus/mcp-pymetasploit3)（Metasploit RPC 的 MCP 封装）：
+对接 [mcp-pymetasploit3](https://github.com/daedalus/mcp-pymetasploit3)（Metasploit RPC 的 MCP 封装）。
 
-- **决策层**（`msf/`，纯函数）：漏洞类别/目标 → 确定性候选模块、参数、前置条件、失败分支；
-  同一输入永远得到同一 `plan_id` 与同一顺序，未收录的类别返回 `search_modules` 检索建议而不是猜模块。
-- **执行层**：`msf_plan`（只读）→ `msf_execute`（连 MCP，use_module → 设参 → execute → 轮询 `list_sessions`，
-  无会话自动切下一候选）→ 拿到 session 后自动采集证据并写回 fact。
-- **全自动**：ARTEX 启动时自动拉起受管 msfrpcd（随机密码、仅 loopback，退出时回收）；
-  MCP 无需在 UI 配置（内置启动器兜底）；漏洞确认后直接下发高优先级利用意图给 worker 池
-  （验证器与 UI 手动确认两条入口一致），不再依赖下一轮 planner 派单。人只负责给目标与授权范围。
-- **边界**：`msf_execute` 先做任务 scope 硬校验（越界拒绝）；失败按
-  `msf_next` 的 retry / degrade / stop 处理，禁止原样重试同一候选。
+> **当前状态：端到端已跑通（2026-10-27，本地 Tomcat 7.0.79 靶场）。** 链路：模型侦察 →
+> `report_finding` → 自动验证 confirmed → `msfAutoKick` 直接派单 → worker `msf_plan` →
+> `msf_execute` → Metasploit 拿到 session → 自动取证写回 fact。任务 #6 用时 3 分 30 秒、¥1.07；
+> 任务 #7 复验取证、¥0.86。
+
+**已验证（2026-10-27，任务 #6 / #7）**
+
+- **端到端闭环**：worker 用 `PUT /shell.jsp/` 确认 CVE-2017-12615 → `report_finding`（pending）→
+  自动验证器置 confirmed → `msfAutoKick` 写入 `action=msf_exploit` 的高优先级意图 → worker 调
+  `msf_plan`/`msf_execute` → `tomcat_jsp_upload_bypass` 拿到 `session 1` → 自动取证写回 fact
+  （`msf_session_id=1`、`confidence=confirmed`）。两个任务均 `done`，无人工介入。
+- **候选链按分支走**：候选 1 `tomcat_mgr_upload` 无凭据失败（`no_session`）→ 自动切候选 2
+  `tomcat_jsp_upload_bypass` 成功，`attempted=2`、`sessions=["1"]`。
+- **受管 msfrpcd**：启动自动拉起（随机密码、仅 loopback、退出回收）——实测 10–22 秒监听
+  `127.0.0.1:55553`；用 `pymetasploit3` 直连可看到同一会话
+  （`via_exploit=tomcat_jsp_upload_bypass`、`username=Administrator`）。
+- **决策层**（`msf/`，纯函数）：同一输入永远得到同一 `plan_id` 与候选顺序；未收录类别返回
+  `search_modules` 检索建议。
+- **自动取证**：拿到 session 后自动在会话里执行 `whoami`/`hostname` 并把输出写回 fact；
+  Windows shell 需要 CRLF（已修，见下），实测回显 `PC-20241005ZJHG`。
+
+**已知限制**
+
+- 仓库里预编译的 `artex.exe` 构建早于该功能，**不含任何 msf 代码**，必须从当前源码重新编译
+  （`go build -tags embedui`）；本轮验证用的是 `artex-msf3.exe`。
+- 自动派单入口只有两条：验证器确认与 UI/API 手动确认。worker 直接 `report_finding` 只写 pending，
+  要等验证器；`finding_verify_mode=off` 时不验证，也就不会派单。
+- 候选模块覆盖面约 20 类；无凭据时 `tomcat_mgr_upload` 这类候选必然先失败一轮（会按分支切下一个）。
+- scope 强制层会把 JSP 里的 `java.io` 误判成域名并拦截个别 Bash 调用（实测 worker 重试后绕过，
+  未阻断闭环，但属于待修的误报）。
+
+**本轮修复（2026-10-27）**
+
+- **scope 的 IP 匹配**：`guard` 的 `kind=ip` 行此前只读 `value/domain`，而 `add_task_scope` 把 IP
+  写在 `net` 列，导致已登记的 `127.0.0.1/32` 被判越界、`msf_plan`/`msf_execute` 被连续拦截；
+  现同时读 `net`（CIDR 进 nets、裸 IP 归一化进 ips），`server/msf.go` 的 `msfScopeAllows` 同步修复
+  并抽出纯函数 `scopeRowsAllow` 便于单测。
+- **候选链的 OS/凭据**：Web 载体类模块（tomcat/jenkins/struts2/weblogic/shiro/spring/…）不再写死
+  Linux meterpreter payload，交给 MSF 按 target 自选（写死会因不兼容直接失败）；原生 exploit 支持
+  `os=windows|linux` 选 payload 家族；新增 `username`/`password` → `HttpUsername`/`HttpPassword`，
+  `tomcat_mgr_upload` 这类需要登录的候选才跑得动。
+- **自动取证**：`interact_session` 发 `whoami` 时改用 CRLF（Windows cmd 只认 CRLF，原来只发 `\n`
+  导致连续多次拿到 `{"output":""}`、fact 证据为空）；空输出不再当证据写回。实测回显 `PC-20241005ZJHG`。
+- **自动派单兜底**：finding 没有锚定资产时，从摘要/证据文本回收目标（`msfTargetFromFinding`），
+  避免「确认了却永远不派单」。
 
 **零手工安装**：首次启动检测不到 `mcp-pymetasploit3` 时，ARTEX 会自动执行
 `pip install "mcp-pymetasploit3[mcp]"`（后台执行，最长 5 分钟；`ARTEX_MSF_AUTO_INSTALL=0` 可关，

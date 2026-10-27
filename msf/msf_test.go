@@ -23,6 +23,74 @@ func TestNormalizeClass(t *testing.T) {
 	}
 }
 
+func TestBuildWebClassLeavesPayloadToModule(t *testing.T) {
+	p, err := Build(Input{VulnClass: "Tomcat CVE-2017-12615", Host: "127.0.0.1", Port: 8080,
+		URL: "http://127.0.0.1:8080", LHOST: "127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range p.Candidates {
+		if c.Module == "exploit/multi/http/tomcat_jsp_upload_bypass" {
+			found = true
+			if c.Payload != "" {
+				t.Fatalf("Web 载体模块不应写死 PAYLOAD（MSF 需按 target 自选），得到 %q", c.Payload)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("缺少 tomcat_jsp_upload_bypass 候选")
+	}
+}
+
+func TestBuildNativePayloadByOS(t *testing.T) {
+	win, err := Build(Input{VulnClass: "redis 未授权", Host: "10.0.0.9", OS: "windows", LHOST: "10.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(win.Candidates) == 0 {
+		t.Fatal("no candidates")
+	}
+	if got := win.Candidates[0].Payload; !strings.HasPrefix(got, "windows/") {
+		t.Fatalf("os=windows 应选 windows payload，得到 %q", got)
+	}
+	lin, err := Build(Input{VulnClass: "redis 未授权", Host: "10.0.0.9", OS: "linux", LHOST: "10.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lin.Candidates[0].Payload; !strings.HasPrefix(got, "linux/") {
+		t.Fatalf("os=linux 应选 linux payload，得到 %q", got)
+	}
+}
+
+func TestBuildCredentialOptionsAndPlanID(t *testing.T) {
+	base := Input{VulnClass: "tomcat", Host: "127.0.0.1", Port: 8080, URL: "http://127.0.0.1:8080"}
+	without, err := Build(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withCreds := base
+	withCreds.Username = "tomcat"
+	withCreds.Password = "s3cret"
+	with, err := Build(withCreds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(with.Candidates) == 0 {
+		t.Fatal("no candidates")
+	}
+	c := with.Candidates[0]
+	if c.Options["HttpUsername"] != "tomcat" || c.Options["HttpPassword"] != "s3cret" {
+		t.Fatalf("凭据未写入模块选项：%v", c.Options)
+	}
+	if without.Candidates[0].Options["HttpUsername"] != "" {
+		t.Fatal("无凭据时不应写 HttpUsername")
+	}
+	if with.PlanID == without.PlanID {
+		t.Fatal("plan_id 应随凭据变化（同输入同结果，不同输入不同结果）")
+	}
+}
+
 func TestBuildDeterministicAndOptions(t *testing.T) {
 	ssl := true
 	in := Input{
@@ -52,8 +120,9 @@ func TestBuildDeterministicAndOptions(t *testing.T) {
 	if c.Options["TARGETURI"] != "/app/login.action" {
 		t.Fatalf("targeturi: %q", c.Options["TARGETURI"])
 	}
-	if !strings.Contains(c.Options["PAYLOAD"], "linux/x64") {
-		t.Fatalf("payload: %q", c.Options["PAYLOAD"])
+	// struts2 属于 Web 载体类模块：PAYLOAD 由模块按 target 自选，不应写死。
+	if c.Payload != "" {
+		t.Fatalf("struts2 不应写死 payload: %q", c.Payload)
 	}
 	if len(p1.Preconditions) == 0 || !strings.Contains(p1.Preconditions[0], "port_open") {
 		t.Fatalf("no preconditions: %+v", p1.Preconditions)

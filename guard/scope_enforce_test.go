@@ -198,3 +198,23 @@ func TestScopeEnforceSwitch(t *testing.T) {
 		t.Error("总开关打开时必须阻断")
 	}
 }
+
+// IP 范围登记在 net 列（add_task_scope 的写法）时必须命中：旧实现只读
+// value/domain，导致 127.0.0.1/32 被整条丢弃、MSF 闭环被自己拦死。
+func TestIPScopeFromNetColumn(t *testing.T) {
+	set := buildScopeSet([]db.TaskScope{
+		{Kind: "ip", Net: "127.0.0.1/32"},
+		{Kind: "ip", Value: "10.0.0.5"},
+		{Kind: "ip", Net: "192.168.1.0/24"},
+	})
+	for _, h := range []string{"127.0.0.1", "10.0.0.5", "192.168.1.9"} {
+		if !set.hostInScope(h) {
+			t.Fatalf("%s 应命中已登记范围", h)
+		}
+	}
+	for _, h := range []string{"127.0.0.2", "10.0.0.6", "192.168.2.9"} {
+		if set.hostInScope(h) {
+			t.Fatalf("%s 不应命中已登记范围", h)
+		}
+	}
+}

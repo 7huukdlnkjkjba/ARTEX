@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -19,6 +21,44 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/msf"
 )
+
+// 自动派单兜底：worker 上报的漏洞常常没有锚定资产（asset_ids 为空或锚定失败），
+// 旧逻辑此时 host=="" 直接 return，利用意图永远不会被派发。这里从 finding 的
+// 摘要/证据文本里回收目标，保证"确认 → 派单"这条入口不因缺资产而断掉。
+var (
+	findingURLRe = regexp.MustCompile(`(?i)https?://[^\s"'<>()\[\]{}，。；、]+`)
+	findingIPRe  = regexp.MustCompile(`\b(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?\b`)
+)
+
+// msfTargetFromFinding 从文本里抽取 (host, port)；找不到返回空。
+func msfTargetFromFinding(text string) (string, int) {
+	for _, raw := range findingURLRe.FindAllString(text, -1) {
+		u, err := url.Parse(strings.TrimRight(raw, ".,;:"))
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		port := 0
+		if p := u.Port(); p != "" {
+			port, _ = strconv.Atoi(p)
+		}
+		if port == 0 {
+			if u.Scheme == "https" {
+				port = 443
+			} else {
+				port = 80
+			}
+		}
+		return u.Hostname(), port
+	}
+	if m := findingIPRe.FindStringSubmatch(text); m != nil {
+		port := 0
+		if m[2] != "" {
+			port, _ = strconv.Atoi(m[2])
+		}
+		return m[1], port
+	}
+	return "", 0
+}
 
 // msfProc owns an ARTEX-managed msfrpcd instance so the Metasploit closed loop
 // needs no manual start: on boot (unless disabled) ARTEX ensures an RPC endpoint
@@ -378,6 +418,10 @@ func (s *Server) msfAutoKick(ctx context.Context, findingID int64) {
 				}
 			}
 		}
+	}
+	if host == "" {
+		// 无资产锚点时从摘要/证据文本回收目标：否则自动派单入口会静默失效。
+		host, port = msfTargetFromFinding(f.Summary + "\n" + f.Evidence)
 	}
 	if host == "" {
 		return

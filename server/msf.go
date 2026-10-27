@@ -32,6 +32,9 @@ type msfArgs struct {
 	SSL       *bool  `json:"ssl"`
 	LHOST     string `json:"lhost"`
 	LPORT     int    `json:"lport"`
+	OS        string `json:"os"`
+	Username  string `json:"username"`
+	Password  string `json:"password"`
 }
 
 func (a msfArgs) input() msf.Input {
@@ -39,6 +42,7 @@ func (a msfArgs) input() msf.Input {
 		VulnClass: a.VulnClass, Product: a.Product, Version: a.Version,
 		Host: a.Host, Port: a.Port, Service: a.Service, URL: a.URL,
 		SSL: a.SSL, LHOST: a.LHOST, LPORT: a.LPORT,
+		OS: a.OS, Username: a.Username, Password: a.Password,
 	}
 }
 
@@ -57,6 +61,9 @@ func msfSchema() map[string]any {
 			"ssl":        map[string]any{"type": "boolean", "description": "是否 HTTPS（缺省按 443/https URL 推断）"},
 			"lhost":      str("反弹 payload 的回连地址（内网渗透时为平台可达地址）"),
 			"lport":      map[string]any{"type": "integer", "description": "回连端口，默认 4444"},
+			"os":         str("目标操作系统 windows/linux/auto（可选；原生 exploit 据此选 PAYLOAD，Web 载体模块不写 PAYLOAD）"),
+			"username":   str("目标凭据用户名（可选，用于 tomcat_mgr_upload 等需要登录的模块，写入 HttpUsername）"),
+			"password":   str("目标凭据密码（可选，写入 HttpPassword）"),
 		},
 		"required": []any{"host"},
 	}
@@ -528,28 +535,74 @@ func (s *Server) msfScopeAllows(ctx context.Context, host string) (bool, string)
 	if len(rows) == 0 {
 		return true, "任务未登记 scope（bootstrap）"
 	}
-	h := strings.ToLower(strings.TrimSpace(host))
+	if scopeRowsAllow(rows, host) {
+		return true, ""
+	}
+	return false, "目标 " + host + " 不在任务授权 scope 内"
+}
+
+// scopeRowsAllow 是 msf_execute 的纯函数版范围判定（便于单测）。与 guard 的
+// 强制层保持一致：ip 行要同时看 value 与 net（add_task_scope 把 IP 落在 net 列），
+// 否则已登记的 127.0.0.1/32 会被误判越界，把整个 MSF 闭环挡在门外。
+func scopeRowsAllow(rows []db.TaskScope, host string) bool {
+	h := normalizeScopeTarget(host)
+	if h == "" {
+		return true
+	}
 	ip := net.ParseIP(h)
 	for _, r := range rows {
 		switch r.Kind {
 		case "ip":
-			if strings.EqualFold(strings.TrimSpace(r.Value), h) {
-				return true, ""
+			for _, v := range []string{r.Value, r.Net, r.Domain} {
+				v = strings.TrimSpace(v)
+				if v == "" {
+					continue
+				}
+				if _, n, err := net.ParseCIDR(v); err == nil {
+					if ip != nil && n.Contains(ip) {
+						return true
+					}
+					continue
+				}
+				if normalizeScopeTarget(v) == h {
+					return true
+				}
 			}
 		case "cidr":
-			if ip != nil {
-				if _, n, err := net.ParseCIDR(strings.TrimSpace(r.Net)); err == nil && n.Contains(ip) {
-					return true, ""
+			if ip == nil {
+				continue
+			}
+			for _, v := range []string{r.Net, r.Value} {
+				if _, n, err := net.ParseCIDR(strings.TrimSpace(v)); err == nil && n.Contains(ip) {
+					return true
 				}
 			}
 		case "root_domain", "subdomain":
 			d := strings.ToLower(strings.TrimSpace(r.Domain))
 			if d != "" && (h == d || strings.HasSuffix(h, "."+d)) {
-				return true, ""
+				return true
 			}
 		}
 	}
-	return false, "目标 " + host + " 不在任务授权 scope 内"
+	return false
+}
+
+// normalizeScopeTarget 把 URL / host:port / 大小写统一成裸主机名。
+func normalizeScopeTarget(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if i := strings.Index(v, "://"); i >= 0 {
+		v = v[i+3:]
+	}
+	if i := strings.IndexAny(v, "/?#"); i >= 0 {
+		v = v[:i]
+	}
+	if h, _, err := net.SplitHostPort(v); err == nil {
+		v = h
+	}
+	return strings.TrimSuffix(strings.ToLower(v), ".")
 }
 
 // createConsole opens one Metasploit console and returns its id.
@@ -665,27 +718,30 @@ func consoleData(txt string) (string, bool) {
 // msfSessionEvidence runs a read-only triage bundle in a fresh session and
 // returns its output. Failures are non-fatal: the session itself is the win.
 func (s *Server) msfSessionEvidence(ctx context.Context, sess *msfSession, id string) string {
-	// interact_session writes raw bytes (a shell needs the trailing newline) and
-	// reads back after ~1s; a just-opened shell often returns empty on the first
-	// call, so poll a few times before giving up.
-	cmd := "id; whoami; hostname\n"
+	// interact_session 写原始字节。Windows cmd 只认 CRLF：只发 \n 时命令不会执行，
+	// 输出恒为空（实测 generic/shell_reverse_tcp 上就是这样）。因此这里用 CRLF，
+	// 并把两条命令分开跑：whoami 在 Windows/Linux 都存在，hostname 兜底。
+	cmds := []string{"whoami\r\n", "hostname\r\n", "ipconfig\r\n"}
 	var last string
-	for attempt := 0; attempt < 6; attempt++ {
+	for attempt := 0; attempt < 8; attempt++ {
 		select {
-		case <-time.After(1200 * time.Millisecond):
+		case <-time.After(1500 * time.Millisecond):
 		case <-ctx.Done():
 			return last
 		}
-		txt, err := sess.call(ctx, "interact_session", map[string]any{"session_id": id, "command": cmd})
-		if err != nil {
-			last = ""
-			continue
-		}
-		if out := sessionOutput(txt); out != "" {
-			return out
+		for _, cmd := range cmds {
+			txt, err := sess.call(ctx, "interact_session", map[string]any{"session_id": id, "command": cmd})
+			if err != nil {
+				continue
+			}
+			if out := sessionOutput(txt); out != "" {
+				last = out
+				// 拿到第一条真实输出就够证明会话可执行；继续收集其余命令会拖慢闭环。
+				return strings.TrimSpace(last)
+			}
 		}
 	}
-	log.Printf("[msf] 会话 %s 取证为空（interact_session 连续 6 次无输出）", id)
+	log.Printf("[msf] 会话 %s 取证为空（interact_session 连续 8 轮无输出）", id)
 	return last
 }
 
@@ -693,7 +749,8 @@ func sessionOutput(txt string) string {
 	var v struct {
 		Output string `json:"output"`
 	}
-	if err := json.Unmarshal([]byte(txt), &v); err == nil && v.Output != "" {
+	if err := json.Unmarshal([]byte(txt), &v); err == nil {
+		// 空输出就是空：不要把 {"output":""} 这个壳当成证据写回 fact。
 		return strings.TrimSpace(v.Output)
 	}
 	return strings.TrimSpace(txt)

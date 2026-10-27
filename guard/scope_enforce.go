@@ -146,8 +146,23 @@ func buildScopeSet(rows []db.TaskScope) *taskScopeSet {
 				set.hosts[d] = true
 			}
 		case "ip":
-			if ip := normalizeScopeHost(firstNonEmpty(r.Value, r.Domain)); ip != "" {
-				set.ips[ip] = true
+			// add_task_scope 把 IP 存在 net 列（cidr 类型，形如 127.0.0.1/32），
+			// 旧实现只读 value/domain，导致已登记的 IP 范围被整条丢弃、
+			// 目标明明在范围内却被判越界。这里同时读 net：CIDR 进 nets，
+			// 裸 IP 归一化后进 ips。
+			raw := firstNonEmpty(r.Value, r.Net, r.Domain)
+			if raw != "" {
+				if _, n, err := net.ParseCIDR(strings.TrimSpace(raw)); err == nil {
+					set.nets = append(set.nets, n)
+					continue
+				}
+				if v := normalizeScopeHost(raw); v != "" {
+					if ip := net.ParseIP(v); ip != nil {
+						set.ips[ip.String()] = true
+						continue
+					}
+					set.ips[v] = true
+				}
 			}
 		case "cidr":
 			if _, n, err := net.ParseCIDR(strings.TrimSpace(firstNonEmpty(r.Net, r.Value))); err == nil {
