@@ -14,11 +14,13 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 | 版本 | 内容 |
 |---|---|
+| **v0.3.16** | **deepseek-hermes省钱代码（成本控制）**：单次会话默认 ¥6 封顶，缓存命中按 ¥0.5/M 单独计价、不与输入重复计费，预算余额写进 planner/worker 提示词逼模型收敛，任务详情显示 `≈¥已用 / 上限` |
 | **v0.3.17** | 并入「外网突破 → 立足点 → 内网纵深」：webshell 会话、penelope 反弹、`session_recon`、suo5/chisel 隧道、内网拓扑、凭据库、待授权网段、任务移交、伪装门控、一键放行、RoE 三态、蜜罐识别、chains 技能、`artex doctor` |
 | **v0.3.18** | Metasploit **全自动闭环**：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、漏洞确认后自动派单、会话自动取证并写回 fact；闭环依赖**自动安装**（首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`，可关、可指定解释器） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
+- 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
 ---
@@ -112,6 +114,51 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 `ARTEX_MSF_PYTHON=/path/to/python` 可指定解释器/venv）。Metasploit 已安装时也无需手工启动 msfrpcd。
 模块映射、分支语义与环境变量见 [MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)，Windows 可用
 [scripts/setup-msf-mcp.ps1](scripts/setup-msf-mcp.ps1) 做预检。
+
+---
+
+## 成本控制（DeepSeek 省钱）
+
+0.3.16 起，每个任务（一次漏洞挖掘会话）默认**封顶 ¥6**：按任务累计 `llm_usage` 台账里的 token，
+用价格表折算成人民币，到线就不再发出新的模型调用。价格表默认按 **deepseek-chat 官方价**配置
+（输入 ¥2/百万、缓存命中 ¥0.5/百万、输出 ¥8/百万、缓存写入不单独计费），所以「¥6 能买多少
+token」是按 DeepSeek 算的：
+
+- **两级闸门，停在 6 块附近而不是跑飞了才停**：在跑的 worker/planner 在下一次模型调用时由平台
+  本地合成一个「预算已用尽」的正常结束回合（零成本、不触发重试、不把意图标成 blocked）；引擎同时
+  停止派发/领取新意图，等在跑的执行 drain 完（上限 90 秒，超时才硬取消）后把任务落成 `paused`，
+  已写回的事实、资产、漏洞全部保留。预算耗尽不跑「终局规划轮」——那一轮本身也要花钱。
+- **缓存命中不重复计费**：norma 的 `InputTokens` 是含缓存命中的总输入，成本按
+  `(输入 − 缓存命中) × 输入价 + 缓存命中 × 命中价 + 输出 × 输出价` 计算，不会把缓存前缀算两遍。
+- **可调、即时生效**：「系统配置 → **单次会话预算 · 漏洞挖掘成本**」填「元 / 任务」（0 = 不限），
+  改完下一次模型调用就按新值判断；容器可用 `ARTEX_SESSION_BUDGET_CNY` 钉死。
+- **价格表可覆盖**：设置项 `llm_price_{input,output,cache_read,cache_write}_cny_per_mtok`，或环境变量
+  `ARTEX_PRICE_INPUT_CNY_PER_MTOK` / `ARTEX_PRICE_OUTPUT_CNY_PER_MTOK` /
+  `ARTEX_PRICE_CACHE_READ_CNY_PER_MTOK` / `ARTEX_PRICE_CACHE_WRITE_CNY_PER_MTOK`。**默认值只对
+  DeepSeek 准确**：用 Claude / GPT / 中转站时先按实际单价覆盖，否则 ¥6 的购买力会被高估或低估。
+- **钱在页面上看得见**：任务详情「会话」页在 token 总计旁显示 `≈¥已用 / 上限 ¥6.00`（悬停看剩余
+  与触发后的行为，到线标黄）；`GET /api/exploration/tokens` 的 `cost` 字段给出已用 / 上限 / 剩余 /
+  是否计价；仪表盘的 token 卡片把「缓存命中」单列并算命中率。
+- **让模型自己收敛**：planner 每轮、worker 每次运行都会带一行预算余额（上限、已用、剩余、百分比），
+  提示接近上限时优先推进最可能出结果的方向、尽早写回，而不是继续扩大枚举。
+
+### 省钱小妙招
+
+- **先看缓存命中率**：命中部分只按 ¥0.5/百万计，是未命中（¥2/百万）的四分之一。仪表盘的
+  「缓存命中率」长期偏低（不足 50% 会标黄），说明前缀总在变——换模型、改系统提示词、改工具集
+  都会让缓存从零重建。
+- **别中途换模型**：一次会话里切 LLM 配置（含故障转移切到另一个配置）会丢掉已建立的缓存前缀，
+  下一轮全额重算。要换就在开任务前换。
+- **上下文窗口(K) 按模型真实值填**：它只在本地用来算压缩阈值——填得比真实值小会提前触发压缩，
+  而压缩本身也要花 token；填得过大则压缩更晚，后续每轮要带的上下文更长。
+- **worker 数别开太大**：默认 3，每个 worker 是独立上下文，同一份态势要被重复注入。先把并发
+  降下来，再考虑加预算。
+- **按角色分模型**：Agent 管理里可以给每个 agent 单独绑 LLM——planner / mainagent 用强模型，
+  worker 池用便宜的（如 `deepseek-chat`），大头开销在 worker 上。
+- **不需要模型兜底审批就关掉**：「系统 → 命令拦截」的「模型兜底审批」默认关闭；开启后每次裁决
+  都是一次模型调用（该开关下方有独立用量卡片）。
+- **预算到线先「继续」而不是重开任务**：`paused` 是可恢复状态，调高预算后点「继续」从待领队列
+  接着跑；重开任务等于把已经花掉的侦察再买一遍。
 
 ---
 
@@ -547,22 +594,6 @@ flowchart TB
 
 ---
 
-## 交流群
-
-扫码关注微信公众号 **SecSentry**，在公众号后台私信即可入群交流。
-
-<div align="center">
-
-<img src="screenshots/wx.png" alt="微信公众号 SecSentry" width="480" />
-
-</div>
-
----
-## 参考
-
-https://github.com/oritera/Cairn
-
-
 ## 许可与免责声明
 
 ### 开源协议
@@ -573,7 +604,7 @@ https://github.com/oritera/Cairn
 
 > ⚠️ **重要提示**：开源协议本身不限制软件的使用用途。以下的「使用限制」与「免责声明」是作者对使用者的额外约定与郑重声明，请务必遵守。
 
-**ARTEX 仅供个人学习、代码研究与网络技术攻击验证使用，用于对任何线上系统或网站发起实际测试。**
+**ARTEX 仅供个人学习、代码研究与网络技术攻击验证使用，只用于对任何线上系统或网站发起实际测试。**
 
 ### 使用
 
