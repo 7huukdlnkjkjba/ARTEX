@@ -872,6 +872,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	heartbeat := time.NewTimer(interval)
 	defer heartbeat.Stop()
 
+	// stall 跟踪「连续无进展规划轮」：目标无法被 prove_goal 收口时 planner 会每轮
+	// 重复规划、永远不落终态（任务卡在 running、持续烧 token）。连续 plannerStallRounds
+	// 轮既没有新图谱进展、也没有待领/在跑意图时，自动暂停任务等待人工补充目标。
+	stall := &plannerStall{}
+
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
 		// debounce: coalesce a burst of changes into one planning round
@@ -972,6 +977,22 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			e.cancelExec(t.ID, agent.AbortGoalMet)
 		default:
 			log.Printf("[planner] task %s 规划完成", t.ID)
+			// 空转保护：任务目标迟迟不能被判 met（典型是 finding 仍 pending、
+			// prove_goal 拿不到证据），planner 会一轮轮重复规划且不落终态。
+			// 连续多轮「无新图谱进展 + 无待领意图 + 无在跑工作」→ 自动暂停，
+			// 避免无限烧 token；人工补目标/提示后点「继续」即可恢复。
+			active, aerr := t.Store.HasActiveIntent()
+			open, oerr := t.Store.CountOpenIntents()
+			if aerr == nil && oerr == nil && stall.observe(plannerProgressSig(t.Store), active, open) {
+				log.Printf("[planner] task %s 连续 %d 轮无进展（无待领/在跑意图），自动暂停", t.ID, plannerStallRounds)
+				e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+					Summary: "连续多轮规划没有产生新进展（无待领意图、无在跑工作），任务已自动暂停；补充目标或提示后点「继续」即可恢复。"})
+				e.Pause(t.ID, agent.AbortPausedByUser)
+				if err := e.m.SetTaskStatus(t.ID, "paused"); err != nil {
+					log.Printf("[planner] task %s 落 paused 失败: %v", t.ID, err)
+				}
+				stall.reset()
+			}
 		}
 		e.touch(t.ID)
 	}

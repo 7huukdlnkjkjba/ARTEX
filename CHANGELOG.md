@@ -6,6 +6,11 @@
 
 ### 修改的功能
 
+- **修复 planner 空转导致任务永不落终态**：目标无法被 `prove_goal` 收口时（典型是 finding
+  仍 pending），planner 会一轮轮重复规划、任务长期停在 `running` 并持续烧 token。现于
+  `plannerLoop` 增加空转保护：连续 `plannerStallRounds`(3) 轮「图谱计数无变化 + 无在跑意图 +
+  frontier 无待领意图」即自动 `paused` 并在活动流说明原因；人工补充目标/提示后点「继续」
+  即可恢复。在跑 worker 或新产生的 intent/fact/asset/finding 都会重置计数，不会误伤慢任务。
 - **漏洞确认后直接下发 MSF 利用意图**：`msfAutoKick` 不再只写一条 hint 等 planner 派单，
   而是直接向 frontier 写高优先级意图（origin=`msf`，锚定漏洞节点与资产，summary 自带
   `msf_plan`/`msf_execute`/失败分支说明），worker 池可立即领取；同一漏洞已有 open/running
