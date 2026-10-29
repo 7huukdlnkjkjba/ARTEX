@@ -28,41 +28,34 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// Task is one engagement: a description + goal + its own exploration store,
-// sharing the process-wide asset store. ID is the PG task id as a string; ExpID
-// is the exploration the task owns.
 type Task struct {
-	ID           string `json:"id"`
-	ExpID        int64  `json:"exploration_id"`
-	Name         string `json:"name"` // 可选任务名称;空=未命名
-	CategoryID   *int64 `json:"category_id,omitempty"`
-	CategoryName string `json:"category_name,omitempty"`
-	PinnedAt     int64  `json:"pinned_at,omitempty"`
-	Description  string `json:"description"`
-	Goal         string `json:"goal"`
-	CreatedAt    int64  `json:"created_at"`
-	CompletedAt  int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
-	Paused       bool   `json:"paused"`
-	Queued       bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
-	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
-	// finer than CreatedAt so several tasks enqueued in the same second retain
-	// their real FIFO order.
-	QueuedAt           int64   `json:"queued_at,omitempty"`
-	QueueMode          string  `json:"queue_mode,omitempty"`
-	ParentRef          string  `json:"parent_ref,omitempty"`     // 父任务 id(编排 spawn 记录)
-	LLMProfileID       *int64  `json:"llm_profile_id,omitempty"` // 指定运行本任务 planner/worker 的 LLM 配置;nil=用全局激活配置
-	LLMProfileIDs      []int64 `json:"llm_profile_ids,omitempty"`
-	ActiveLLMProfileID *int64  `json:"active_llm_profile_id,omitempty"`
-	LLMChainRevision   int64   `json:"-"`
-	LLMFailoverState   string  `json:"llm_failover_state,omitempty"`
-	LLMFailoverReason  string  `json:"llm_failover_reason,omitempty"`
-	SourceTaskIDs      []int64 `json:"source_task_ids,omitempty"`
-	CompanyIDs         []int64 `json:"company_ids,omitempty"`
-	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
-	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
+	ID                   string                 `json:"id"`
+	ExpID                int64                  `json:"exploration_id"`
+	Name                 string                 `json:"name"`
+	CategoryID           *int64                 `json:"category_id,omitempty"`
+	CategoryName         string                 `json:"category_name,omitempty"`
+	PinnedAt             int64                  `json:"pinned_at,omitempty"`
+	Description          string                 `json:"description"`
+	Goal                 string                 `json:"goal"`
+	CreatedAt            int64                  `json:"created_at"`
+	CompletedAt          int64                  `json:"completed_at,omitempty"`
+	Paused               bool                   `json:"paused"`
+	Queued               bool                   `json:"queued"`
+	QueuedAt             int64                  `json:"queued_at,omitempty"`
+	QueueMode            string                 `json:"queue_mode,omitempty"`
+	ParentRef            string                 `json:"parent_ref,omitempty"`
+	LLMProfileID         *int64                 `json:"llm_profile_id,omitempty"`
+	LLMProfileIDs        []int64                `json:"llm_profile_ids,omitempty"`
+	ActiveLLMProfileID   *int64                 `json:"active_llm_profile_id,omitempty"`
+	LLMChainRevision     int64                  `json:"-"`
+	LLMFailoverState     string                 `json:"llm_failover_state,omitempty"`
+	LLMFailoverReason    string                 `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs        []int64                `json:"source_task_ids,omitempty"`
+	CompanyIDs           []int64                `json:"company_ids,omitempty"`
+	Status               string                 `json:"status"`
 	TimeoutSeconds       int                    `json:"timeout_seconds"`
-	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
-	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"`
+	CoverageEnabled      bool                   `json:"coverage_enabled"`
 	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
 	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
 	Store                *pgdb.ExplorationStore `json:"-"`
@@ -71,17 +64,10 @@ type Task struct {
 	lifecycleMu          sync.RWMutex
 	llmMu                sync.RWMutex
 
-	// pendingTriggers accumulates the concrete changes (worker done / finding) that
-	// fired planning rounds since the last one consumed them. The debounce coalesces
-	// a burst into one round, so several may pile up before drainTriggers() clears them.
 	trigMu          sync.Mutex
 	pendingTriggers []agent.TriggerEvent
 }
 
-// taskLifecycleState is an internally consistent view of the mutable task
-// lifecycle and inherited-scope context. Callers must use lifecycleSnapshot and
-// updateLifecycle instead of reading or writing the corresponding Task fields
-// directly after the task has been published by Manager.
 type taskLifecycleState struct {
 	Name          string
 	PinnedAt      int64
@@ -196,8 +182,6 @@ func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, revis
 	return true
 }
 
-// DeleteTaskOptions controls cleanup of data stored outside the task's own
-// exploration graph. All options default to false for backward compatibility.
 type DeleteTaskOptions struct {
 	DeleteAssets     bool `json:"delete_assets"`
 	DeleteTraffic    bool `json:"delete_traffic"`
@@ -206,7 +190,6 @@ type DeleteTaskOptions struct {
 	DeleteLLMRecords bool `json:"delete_llm_records"`
 }
 
-// DeleteTaskResult makes destructive cleanup auditable to API callers.
 type DeleteTaskResult struct {
 	Deleted           string `json:"deleted"`
 	AssetsDeleted     int64  `json:"assets_deleted"`
@@ -218,102 +201,58 @@ type DeleteTaskResult struct {
 	CleanupWarning    string `json:"cleanup_warning,omitempty"`
 }
 
-// Manager owns the PostgreSQL data source (asset graph + every task's exploration
-// graph + config) and the in-memory set of task handles.
 type Manager struct {
 	dir         string
 	pg          *pgdb.DB
 	assets      *pgdb.AssetStore
-	traffic     *traffic.Traffic       // process-wide recording proxy (may be nil)
-	enrich      *enrich.Engine         // engine-side asset auto-completion (DNS/HTTP)
-	interceptor *intercept.Interceptor // user-configured tool-call interception rules
-	// egress 是批 5 B2 出口审查的进程级敏感指纹集合(见 guard/egress.go):每任务
-	// 的 Guard 都引用这同一份(taskFromPG/agentGuard 装配),server 在启动与 LLM
-	// profile 变更时向它注册指纹,一次注册对全部任务生效。
-	egress *guard.EgressGuard
+	traffic     *traffic.Traffic
+	enrich      *enrich.Engine
+	interceptor *intercept.Interceptor
+	egress      *guard.EgressGuard
 
-	companyMu sync.Mutex // serializes task/company-scope commits with live handle registration
-	// taskStateMu preserves commit order between PostgreSQL lifecycle writes and
-	// their in-memory mirrors. lifecycleMu makes snapshots race-free, but without
-	// this outer write lock an older request could commit first and publish last.
-	taskStateMu sync.Mutex
-	mu          sync.RWMutex
-	tasks       map[string]*Task
-	active      string
-	trafficOn   bool // 流量捕获开关（默认关；settings.traffic_capture）
-	llmRecOn    bool // LLM 录制开关（默认关；settings.llm_record）
-	// 联网搜索开关与来源（默认关；settings.web_search_*）。brave-free 需要 braveKey；tavily 需要 tavilyKey。
-	// webSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关。
+	companyMu        sync.Mutex
+	taskStateMu      sync.Mutex
+	mu               sync.RWMutex
+	tasks            map[string]*Task
+	active           string
+	trafficOn        bool
+	llmRecOn         bool
 	webSearchOn      bool
 	webSearchBackend string
 	braveKey         string
 	tavilyKey        string
 	webSearchProxy   string
-	// globalProxy is the egress proxy all target traffic routes through
-	// (http/https/socks5, optional user:pass). Empty = direct. When traffic
-	// capture is on it becomes the MITM's upstream; when capture is off it is
-	// injected into agent bash env / WebFetch directly. See ProxyAddr.
-	globalProxy string
-	// taskProxy 期 3b 按任务 MITM 实例管理器(见 taskproxy.go);nil = 关闭
-	// (ARTEX_TASK_PROXY=off 或端口池非法)。worker 流量经任务实例 → 任务隧道。
-	taskProxy *taskProxyManager
+	globalProxy      string
+	taskProxy        *taskProxyManager
 }
 
-// Settings keys the UI toggles at runtime.
 const (
-	settingTrafficCapture      = "traffic_capture"
-	settingAgentTrafficBinding = "agent_traffic_binding"
-	settingWebSearchOn         = "web_search_enabled"
-	settingWebSearchBackend    = "web_search_backend"
-	settingBraveKey            = "brave_search_api_key"
-	settingTavilyKey           = "tavily_search_api_key"
-	settingWebSearchProxy      = "web_search_proxy"
-	// settingGlobalProxy is the global egress proxy for all target traffic
-	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
-	// only routes the search backend) and the per-profile LLM proxy.
-	settingGlobalProxy = "global_proxy"
-	settingWorkers     = "workers"
-	settingLLMRecord   = "llm_record"
-	// settingLLMRecordsRetentionDays 是 llm_records 的按天保留期:默认 30 天,
-	// 0 = 不清理。见 startLLMRecordsRetention 的每日清理。
+	settingTrafficCapture          = "traffic_capture"
+	settingAgentTrafficBinding     = "agent_traffic_binding"
+	settingWebSearchOn             = "web_search_enabled"
+	settingWebSearchBackend        = "web_search_backend"
+	settingBraveKey                = "brave_search_api_key"
+	settingTavilyKey               = "tavily_search_api_key"
+	settingWebSearchProxy          = "web_search_proxy"
+	settingGlobalProxy             = "global_proxy"
+	settingWorkers                 = "workers"
+	settingLLMRecord               = "llm_record"
 	settingLLMRecordsRetentionDays = "llm_records_retention_days"
-	// defaultLLMRecordsRetentionDays is the retention when the setting is unset.
 	defaultLLMRecordsRetentionDays = 30
-	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
-	// 不可用(余额不足/key 失效/限流/服务异常)时自动切到下一个配置。
-	// settingLLMPoolBindFallback 仅在轮询开启时有意义:默认关闭,即 agent/任务显式
-	// 绑定了某个配置就只用它、失败即失败;开启后绑定的配置失败也会回落到轮询链。
-	settingLLMPoolOn           = "llm_pool_enabled"
-	settingLLMPoolBindFallback = "llm_pool_bind_fallback"
-	// 任务并发上限:开关 + 上限数。默认关闭;开启后默认上限 5(见 defaultConcurrencyLimit)。
-	settingConcurrencyOn    = "task_concurrency_enabled"
-	settingConcurrencyLimit = "task_concurrency_limit"
-	// 实验功能:noa 模型驱动上下文压缩(norma v0.4.0)。默认关闭——开启后平台接入的四类
-	// agent(planner/worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction。
-	// 每 run 读一次,切换只影响之后启动的 run。
-	settingNoaCompaction = "noa_compaction"
-	// 任务终态自动清日志:任务进入终态(done/failed/timeout)时清空后端日志
-	// (server_logs + 内存缓冲)。默认开——成功与失败一视同仁,跑完不留日志。
-	settingClearLogsOnTaskEnd = "clear_logs_on_task_end"
-	// defaultWebSearchBackend is used when web search is on but no backend was picked.
-	defaultWebSearchBackend = "ddgs"
-	// deepSeekWebSearchBackend borrows the active LLM profile instead of its own
-	// key, so it only works on an anthropic-format profile pointed at DeepSeek.
-	deepSeekWebSearchBackend = "deepseek"
-	// defaultWorkers is the concurrent work-agent count when the setting is unset.
-	defaultWorkers = 3
-	// defaultConcurrencyLimit is the simultaneous-running-task cap when the feature
-	// is enabled but no explicit limit was saved.
-	defaultConcurrencyLimit = 5
-	// settingTarpitFetchBudget 是批 5 B3 tarpit 熔断的每 host 抓取预算(默认 40,
-	// 见 guard.defaultTarpitFetchBudget);settingWebUAPool 是批 5 B4 的客户端 UA 池
-	// (JSON 字符串数组,空则用 agent.DefaultUAPool)。
-	settingTarpitFetchBudget = "tarpit_fetch_budget"
-	settingWebUAPool         = "web_ua_pool"
+	settingLLMPoolOn               = "llm_pool_enabled"
+	settingLLMPoolBindFallback     = "llm_pool_bind_fallback"
+	settingConcurrencyOn           = "task_concurrency_enabled"
+	settingConcurrencyLimit        = "task_concurrency_limit"
+	settingNoaCompaction           = "noa_compaction"
+	settingClearLogsOnTaskEnd      = "clear_logs_on_task_end"
+	defaultWebSearchBackend        = "ddgs"
+	deepSeekWebSearchBackend       = "deepseek"
+	defaultWorkers                 = 3
+	defaultConcurrencyLimit        = 5
+	settingTarpitFetchBudget       = "tarpit_fetch_budget"
+	settingWebUAPool               = "web_ua_pool"
 )
 
-// ConcurrencyLimit returns whether the simultaneous-running-task cap is enabled and
-// its limit (default 5 when enabled but unset). limit is always >=1 when enabled.
 func (m *Manager) ConcurrencyLimit() (enabled bool, limit int) {
 	on, _, _ := m.pg.GetSetting(settingConcurrencyOn)
 	if strings.TrimSpace(on) != "true" {
@@ -328,7 +267,6 @@ func (m *Manager) ConcurrencyLimit() (enabled bool, limit int) {
 	return true, limit
 }
 
-// SetConcurrency persists the running-task concurrency cap. limit<1 is clamped to 1.
 func (m *Manager) SetConcurrency(enabled bool, limit int) error {
 	if limit < 1 {
 		limit = defaultConcurrencyLimit
@@ -339,8 +277,6 @@ func (m *Manager) SetConcurrency(enabled bool, limit int) error {
 	return m.pg.SetSetting(settingConcurrencyOn, strconv.FormatBool(enabled))
 }
 
-// Workers returns the configured concurrent work-agent count (default 3). Read
-// per-task at engine.Run, so a change applies to tasks started afterwards.
 func (m *Manager) Workers() int {
 	v, ok, err := m.pg.GetSetting(settingWorkers)
 	if err != nil || !ok {
@@ -353,7 +289,6 @@ func (m *Manager) Workers() int {
 	return n
 }
 
-// SetWorkers persists the concurrent work-agent count. Values <=0 are rejected.
 func (m *Manager) SetWorkers(n int) error {
 	if n <= 0 {
 		return fmt.Errorf("workers 必须 >0")
@@ -361,11 +296,8 @@ func (m *Manager) SetWorkers(n int) error {
 	return m.pg.SetSetting(settingWorkers, strconv.Itoa(n))
 }
 
-// Enrich returns the asset auto-completion engine (may be nil if init failed).
 func (m *Manager) Enrich() *enrich.Engine { return m.enrich }
 
-// llmRecordsRetentionDays reads settings.llm_records_retention_days (default 30,
-// 0 = keep forever). Unset/unparseable/negative → default.
 func (m *Manager) llmRecordsRetentionDays() int {
 	v, ok, err := m.pg.GetSetting(settingLLMRecordsRetentionDays)
 	if err != nil || !ok {
@@ -378,9 +310,6 @@ func (m *Manager) llmRecordsRetentionDays() int {
 	return n
 }
 
-// startLLMRecordsRetention runs the llm_records retention cleanup once at startup
-// (idempotent — expired rows may predate the setting) and then every 24h, same
-// pattern as the other Manager-start background loops. Retention 0 disables it.
 func (m *Manager) startLLMRecordsRetention() {
 	clean := func() {
 		days := m.llmRecordsRetentionDays()
@@ -404,23 +333,13 @@ func (m *Manager) startLLMRecordsRetention() {
 	}()
 }
 
-// NewManager connects to PostgreSQL and, if proxyAddr is non-empty, starts the
-// traffic-recording proxy. PostgreSQL is required (it is the single data source).
 func NewManager(dir, proxyAddr string) (*Manager, error) {
-	// Resolve the data dir to an ABSOLUTE path up front. Every data path derives
-	// from it — notably the MITM CA cert, whose path is injected into worker shells
-	// (SSL_CERT_FILE/CURL_CA_BUNDLE) and read by WebFetch. A relative path (the
-	// default is "./data" under `go run`) only resolves when the current working
-	// directory happens to match, so curl/WebFetch in a different CWD fail to load
-	// the CA → TLS to the proxy breaks (curl 000 / EOF). Absolute makes it CWD-proof.
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	// 批 6 L1 蜜罐静态签名库:装配 dataDir 下的签名文件绝对路径(存在则优先并按
-	// mtime 热更新,便于不落盘发版地运营签名库;缺失时引擎回落包内嵌签名库,不空载)。
 	honeydetect.SetSignaturesPath(filepath.Join(dir, "signatures", "honeypot.json"))
 	dsn, source, err := pgdb.DSN()
 	if err != nil {
@@ -446,10 +365,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg), egress: guard.NewEgressGuard()}
-	// 授权范围强制层需要按任务查 task_scope。资产库就是那份数据源（ListTaskScope）。
 	guard.SetScopeStore(pg.Assets())
 	m.startLLMRecordsRetention()
-	m.startPortAudit() // F13 台账外监听端口审计(仅 Linux;只观测不处置)
+	m.startPortAudit()
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -463,8 +381,6 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 				if taskErr != nil {
 					return false, taskErr
 				}
-				// Archived/permanently deleted tasks are hidden from GetTask. A
-				// restored task is visible and needs the staged traffic put back.
 				return task == nil, nil
 			})
 			if err != nil {
@@ -483,12 +399,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			}()
 		}
 	}
-	// Asset auto-completion engine (§5): HTTP probes routed through the recording
-	// proxy (via m.ProxyAddr, which honors the traffic-capture toggle).
 	m.trafficOn = pg.GetBool(settingTrafficCapture, false)
-	// LLM 录制开关（默认关）。录制器每次调用时读取此标志。
 	m.llmRecOn = pg.GetBool(settingLLMRecord, false)
-	// Load persisted web-search config (default: off, ddgs).
 	m.webSearchOn = pg.GetBool(settingWebSearchOn, false)
 	if v, ok, _ := pg.GetSetting(settingWebSearchBackend); ok && v != "" {
 		m.webSearchBackend = v
@@ -504,9 +416,6 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingWebSearchProxy); ok {
 		m.webSearchProxy = v
 	}
-	// Global egress proxy (default: direct). When capture is on, feed it to the
-	// MITM as its upstream so recorded traffic exits through it; when capture is
-	// off, ProxyAddr hands it to agents directly (bash env / WebFetch).
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
 	}
@@ -516,8 +425,6 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		}
 	}
 	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
-	// 期 3b:按任务懒建 MITM(worker 流量 → 任务实例 → 任务隧道 socks → 内网,
-	// 留痕链不断)。ARTEX_TASK_PROXY=off 关闭;端口池 ARTEX_TASK_PROXY_PORT_RANGE。
 	if config.TaskProxyEnabled() {
 		if pmin, pmax, err := tunnel.ParsePortRange(config.TaskProxyPortRange()); err != nil {
 			log.Printf("[taskproxy] 端口池非法,按任务 MITM 关闭: %v", err)
@@ -525,22 +432,16 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			m.taskProxy = newTaskProxyManager(dir, pgdb.NewTunnelStore(pg), m.GlobalProxy, pmin, pmax)
 		}
 	}
-	// Reconcile the seeded browser MCP with the persisted capture state, so a
-	// restart with capture already on keeps Playwright routed through the proxy.
 	m.syncBrowserMCPProxy()
 	return m, nil
 }
 
-// TrafficEnabled reports whether traffic capture is on (default off). When off,
-// no proxy/traffic tools/prompt are injected into agents (nothing is recorded).
 func (m *Manager) TrafficEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.trafficOn
 }
 
-// SetTrafficEnabled persists and applies the traffic-capture toggle. Callers must
-// rebuild the agents (applyLLM) afterwards so the new proxy/tools/prompt take hold.
 func (m *Manager) SetTrafficEnabled(on bool) error {
 	if err := m.pg.SetBool(settingTrafficCapture, on); err != nil {
 		return err
@@ -548,25 +449,16 @@ func (m *Manager) SetTrafficEnabled(on bool) error {
 	m.mu.Lock()
 	m.trafficOn = on
 	m.mu.Unlock()
-	// Inject (on) or strip (off) the recording proxy + CA on the browser MCP so
-	// Playwright routes through the MITM. Must run after the flag flip above, since
-	// ProxyAddr/ProxyCACert honor it. putSettings rebuilds agents next (applyLLM),
-	// which re-spawns the MCP with the new args/env.
 	m.syncBrowserMCPProxy()
 	return nil
 }
 
-// LLMRecordEnabled reports whether LLM request/response recording is on
-// (默认关；settings.llm_record). The recorder consults this per call, so the
-// toggle takes effect immediately without rebuilding agents.
 func (m *Manager) LLMRecordEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.llmRecOn
 }
 
-// SetLLMRecordEnabled persists and applies the LLM-record toggle. Effective at
-// once — no applyLLM needed, since the recorder reads the flag on every call.
 func (m *Manager) SetLLMRecordEnabled(on bool) error {
 	if err := m.pg.SetBool(settingLLMRecord, on); err != nil {
 		return err
@@ -577,22 +469,14 @@ func (m *Manager) SetLLMRecordEnabled(on bool) error {
 	return nil
 }
 
-// NoaCompactionEnabled reports whether the experimental noa context-compression
-// mechanism is on (默认关；settings.noa_compaction). Read per agent run via the
-// injected resolver, so a toggle takes effect on the next run without rebuild.
 func (m *Manager) NoaCompactionEnabled() bool {
 	return m.pg.GetBool(settingNoaCompaction, false)
 }
 
-// SetNoaCompaction persists the noa toggle. Effective on the next agent run —
-// the resolver reads it per run, so no rebuild is needed.
 func (m *Manager) SetNoaCompaction(on bool) error {
 	return m.pg.SetBool(settingNoaCompaction, on)
 }
 
-// LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认关；
-// settings.llm_pool_enabled). Read when the provider chain is built (applyLLM),
-// so a change requires a rebuild — putSettings does that.
 func (m *Manager) LLMPoolEnabled() bool {
 	if m.pg == nil {
 		return false
@@ -600,13 +484,8 @@ func (m *Manager) LLMPoolEnabled() bool {
 	return m.pg.GetBool(settingLLMPoolOn, false)
 }
 
-// SetLLMPoolEnabled persists the failover toggle. Callers rebuild agents
-// (applyLLM) afterwards so it takes effect.
 func (m *Manager) SetLLMPoolEnabled(on bool) error { return m.pg.SetBool(settingLLMPoolOn, on) }
 
-// LLMPoolBindFallback reports whether an agent/task that is BOUND to a specific
-// profile still falls back to the chain when that profile fails (默认关：绑定即
-// 独占，失败即失败). Only meaningful while LLMPoolEnabled.
 func (m *Manager) LLMPoolBindFallback() bool {
 	if m.pg == nil {
 		return false
@@ -614,15 +493,10 @@ func (m *Manager) LLMPoolBindFallback() bool {
 	return m.pg.GetBool(settingLLMPoolBindFallback, false)
 }
 
-// SetLLMPoolBindFallback persists the bound-profile fallback toggle. Callers
-// rebuild agents (applyLLM) afterwards.
 func (m *Manager) SetLLMPoolBindFallback(on bool) error {
 	return m.pg.SetBool(settingLLMPoolBindFallback, on)
 }
 
-// WebSearch returns the current web-search config: whether it is enabled, the
-// backend ("ddgs" | "brave-free" | "tavily"), the Brave API key, the Tavily API
-// key (each empty unless set), and the dedicated egress proxy (empty = direct).
 func (m *Manager) WebSearch() (on bool, backend, braveKey, tavilyKey, proxy string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -633,9 +507,6 @@ func (m *Manager) WebSearch() (on bool, backend, braveKey, tavilyKey, proxy stri
 	return m.webSearchOn, backend, m.braveKey, m.tavilyKey, m.webSearchProxy
 }
 
-// WebSearchOpts returns the config as the agent-package struct the server pushes
-// into each agent. Disabled when off, or when a keyed backend is selected without
-// its key (so a half-configured backend never silently drops the tool at session build).
 func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	on, backend, braveKey, tavilyKey, proxy := m.WebSearch()
 	if on && backend == "brave-free" && strings.TrimSpace(braveKey) == "" {
@@ -651,13 +522,6 @@ func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	return o
 }
 
-// deepSeekSearchCreds resolves the credentials the "deepseek" search backend
-// borrows from the active LLM profile (it has no key of its own). Whether that
-// profile can actually drive server-side search — DeepSeek exposes it only on
-// the Anthropic-format endpoint — is deliberately NOT validated here: the UI
-// states the requirement and the user decides. A profile that can't serve it
-// simply fails at search time (or at the settings page's 测试 button), which is
-// the same feedback every other backend gives for a bad key.
 func (m *Manager) deepSeekSearchCreds() (baseURL, apiKey, model string) {
 	p, err := m.pg.ActiveProfile()
 	if err != nil || p == nil {
@@ -666,10 +530,6 @@ func (m *Manager) deepSeekSearchCreds() (baseURL, apiKey, model string) {
 	return p.BaseURL, p.APIKey, p.Model
 }
 
-// SetWebSearch persists and applies the web-search settings. braveKey, tavilyKey, and
-// proxy are each left untouched when nil (so toggling the switch doesn't wipe a saved
-// key/proxy; pass a pointer to "" to clear). Callers must rebuild agents (applyLLM)
-// afterwards so the settings take effect.
 func (m *Manager) SetWebSearch(on bool, backend string, braveKey, tavilyKey, proxy *string) error {
 	backend = strings.TrimSpace(backend)
 	if backend == "" {
@@ -713,24 +573,8 @@ func (m *Manager) SetWebSearch(on bool, backend string, braveKey, tavilyKey, pro
 	return nil
 }
 
-// browserMCPName is the seeded Playwright MCP whose proxy args + CA env are kept
-// in sync with the traffic-capture toggle.
 const browserMCPName = "browser"
 
-// syncBrowserMCPProxy reconciles the seeded browser MCP's proxy args + CA env with
-// the current traffic-capture state: capture on → route Playwright through the
-// recording proxy and trust its MITM CA (NODE_EXTRA_CA_CERTS); capture off →
-// strip both. Idempotent, and a no-op if the user deleted/renamed the MCP.
-// Must be called WITHOUT m.mu held (ProxyAddr/ProxyCACert take the lock).
-//
-// When the proxy URL carries credentials (F2-1 proxy auth), they cannot go
-// through --proxy-server: playwright-mcp forwards that flag verbatim to
-// Chromium, which ignores userinfo in proxy URLs, and Playwright only answers
-// the 407 challenge from launchOptions.proxy.username/password. Those fields
-// exist only in the playwright-mcp JSON config file, so a managed config
-// (browserMCPProxyConfigPath, 0600 — it holds the password) is written and
-// attached via --config. CLI args keep precedence over the config file, so the
-// user's own flags (--headless etc.) still apply.
 func (m *Manager) syncBrowserMCPProxy() {
 	servers, err := m.pg.ListMCP()
 	if err != nil {
@@ -745,11 +589,11 @@ func (m *Manager) syncBrowserMCPProxy() {
 		}
 	}
 	if srv == nil {
-		return // user removed/renamed it — leave it alone
+		return
 	}
 
-	proxy := m.ProxyAddr()  // "" when capture off
-	cert := m.ProxyCACert() // "" when capture off
+	proxy := m.ProxyAddr()
+	cert := m.ProxyCACert()
 
 	raw := decodeStrSlice(srv.Args)
 	args := stripProxyArgs(raw)
@@ -764,9 +608,6 @@ func (m *Manager) syncBrowserMCPProxy() {
 			u.User = nil
 			switch {
 			case hasForeignProxyConfig(raw, cfgPath):
-				// A user-supplied --config would be fully overridden by ours
-				// (commander keeps the last occurrence). Rather than silently
-				// dropping their settings, leave the proxy unattached and warn.
 				log.Printf("[mcp] browser MCP 自带 --config，无法注入代理认证凭据；浏览器流量将不经过录制代理。请在其 config 的 browser.launchOptions.proxy 中配置 server=%s 及 username/password（口令见 data/traffic/_auth）", u.String())
 			default:
 				if err := writeBrowserMCPProxyConfig(cfgPath, u.String(), user, pass); err != nil {
@@ -782,8 +623,6 @@ func (m *Manager) syncBrowserMCPProxy() {
 			env["NODE_EXTRA_CA_CERTS"] = cert
 		}
 	}
-	// The managed config holds the proxy password; delete it once the args no
-	// longer reference it (capture off, or auth switched off).
 	if !referencesConfig(args, cfgPath) {
 		_ = os.Remove(cfgPath)
 	}
@@ -800,15 +639,12 @@ func (m *Manager) syncBrowserMCPProxy() {
 	}
 }
 
-// stripProxyArgs removes any --proxy-server/--proxy-bypass flags (both "--flag val"
-// and "--flag=val" forms) so they can be re-added cleanly from current state,
-// without mutating the input slice.
 func stripProxyArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--proxy-server" || a == "--proxy-bypass" {
-			i++ // skip the following value too
+			i++
 			continue
 		}
 		if strings.HasPrefix(a, "--proxy-server=") || strings.HasPrefix(a, "--proxy-bypass=") {
@@ -819,16 +655,10 @@ func stripProxyArgs(args []string) []string {
 	return out
 }
 
-// browserMCPProxyConfigPath is the playwright-mcp JSON config ARTEX manages to
-// carry proxy credentials (F2-1). It lives next to the data store and is
-// written 0600 because it contains the proxy password.
 func (m *Manager) browserMCPProxyConfigPath() string {
 	return filepath.Join(m.dir, "browser-mcp-proxy.json")
 }
 
-// writeBrowserMCPProxyConfig persists the minimal playwright-mcp config that
-// routes the browser through a credentialed proxy. CLI args keep precedence
-// over a config file, so this only needs the proxy block.
 func writeBrowserMCPProxyConfig(path, server, username, password string) error {
 	cfg := map[string]any{
 		"browser": map[string]any{
@@ -848,18 +678,15 @@ func writeBrowserMCPProxyConfig(path, server, username, password string) error {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return err
 	}
-	_ = os.Chmod(path, 0o600) // umask backstop
+	_ = os.Chmod(path, 0o600)
 	return nil
 }
 
-// stripManagedProxyConfig removes a previously injected "--config <path>"
-// (both "--flag val" and "--flag=val" forms) so it can be re-added cleanly.
-// Only OUR path is stripped — a user-supplied --config is left untouched.
 func stripManagedProxyConfig(args []string, cfgPath string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--config" && i+1 < len(args) && args[i+1] == cfgPath {
-			i++ // skip our value too
+			i++
 			continue
 		}
 		if args[i] == "--config="+cfgPath {
@@ -870,8 +697,6 @@ func stripManagedProxyConfig(args []string, cfgPath string) []string {
 	return out
 }
 
-// hasForeignProxyConfig reports whether the args carry a --config that is not
-// the ARTEX-managed one.
 func hasForeignProxyConfig(args []string, cfgPath string) bool {
 	for i, a := range args {
 		if a == "--config" && i+1 < len(args) && args[i+1] != cfgPath {
@@ -884,7 +709,6 @@ func hasForeignProxyConfig(args []string, cfgPath string) bool {
 	return false
 }
 
-// referencesConfig reports whether the args still attach the managed config.
 func referencesConfig(args []string, cfgPath string) bool {
 	for i, a := range args {
 		if a == "--config" && i+1 < len(args) && args[i+1] == cfgPath {
@@ -897,7 +721,6 @@ func referencesConfig(args []string, cfgPath string) bool {
 	return false
 }
 
-// redactURL masks the password in a proxy URL for logging.
 func redactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.User == nil {
@@ -933,10 +756,6 @@ func encodeJSON(v any) json.RawMessage {
 	return b
 }
 
-// HostTools are runtime host-provided tools added to EVERY agent's base list (via
-// ToolAugment); the tools table then filters them per-agent binding. Currently the
-// traffic tools, gated by the global capture switch: empty when capture is off, so
-// no agent gets traffic_search/traffic_get regardless of binding.
 func (m *Manager) HostTools() []actool.CoreTool {
 	if m.traffic == nil || !m.TrafficEnabled() {
 		return nil
@@ -948,14 +767,6 @@ func (m *Manager) Assets() *pgdb.AssetStore  { return m.assets }
 func (m *Manager) PG() *pgdb.DB              { return m.pg }
 func (m *Manager) Traffic() *traffic.Traffic { return m.traffic }
 
-// ProxyAddr returns the egress proxy address agents route target traffic through:
-//   - capture ON  → the recording MITM proxy (which itself exits via the global
-//     proxy when one is set); agents also get its CA (see ProxyCACert).
-//   - capture OFF → the global egress proxy directly (empty CA — real target
-//     certs), or "" when no global proxy is set (direct, no recording).
-//
-// So the global proxy takes effect in both modes: at the MITM's upstream when
-// capturing, in the agent's own bash env / WebFetch when not.
 func (m *Manager) ProxyAddr() string {
 	if m.traffic != nil && m.TrafficEnabled() {
 		return m.traffic.ProxyAddr()
@@ -965,11 +776,6 @@ func (m *Manager) ProxyAddr() string {
 	return m.globalProxy
 }
 
-// ProxyCACert returns the CA cert path agents must trust to verify HTTPS through
-// the egress proxy. Non-empty ONLY when traffic capture is on (the MITM re-signs
-// certs): the global proxy used directly (capture off) is a plain forwarder that
-// preserves real target certs, so no custom CA is needed there. Its emptiness is
-// also the worker's "recording off" signal (see workerSystem).
 func (m *Manager) ProxyCACert() string {
 	if m.traffic == nil || !m.TrafficEnabled() {
 		return ""
@@ -977,18 +783,12 @@ func (m *Manager) ProxyCACert() string {
 	return m.traffic.CACertPath()
 }
 
-// GlobalProxy returns the configured global egress proxy URL (empty = direct).
 func (m *Manager) GlobalProxy() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.globalProxy
 }
 
-// TaskProxyForTask is the worker's per-task proxy resolver (期 3b): when capture
-// is on and the task-proxy feature is enabled it lazily builds/returns the task's
-// own MITM instance (addr + CA); "" → the worker falls back to the global
-// SetProxy value. Runs on its own short-timeout context so a cancelled worker
-// run can't abort instance creation halfway.
 func (m *Manager) TaskProxyForTask(taskID int64) (addr, caCert string) {
 	if m.taskProxy == nil || !m.TrafficEnabled() {
 		return "", ""
@@ -998,9 +798,6 @@ func (m *Manager) TaskProxyForTask(taskID int64) (addr, caCert string) {
 	return m.taskProxy.ForTask(ctx, taskID)
 }
 
-// RefreshTaskProxy re-resolves one task's MITM upstream after a tunnel state
-// change (tunnel.Manager.OnStateChange). No-op when the feature is off or the
-// task has no live instance (lazy-build semantics).
 func (m *Manager) RefreshTaskProxy(taskID int64) {
 	if m.taskProxy == nil {
 		return
@@ -1010,18 +807,12 @@ func (m *Manager) RefreshTaskProxy(taskID int64) {
 	m.taskProxy.Refresh(ctx, taskID)
 }
 
-// CloseTaskProxy destroys a task's MITM instance (task deleted/archived). The
-// recorded tree (incl. CA dir) stays on disk — evidence is not instance lifetime.
 func (m *Manager) CloseTaskProxy(taskID int64) {
 	if m.taskProxy != nil {
 		m.taskProxy.CloseTask(taskID)
 	}
 }
 
-// SetGlobalProxy validates, persists and applies the global egress proxy
-// (http/https/socks5, optional user:pass; empty = direct). It updates the MITM's
-// upstream immediately; callers must rebuild agents (applyLLM) afterwards so the
-// capture-off path (bash env / WebFetch) picks up the change too.
 func (m *Manager) SetGlobalProxy(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw != "" {
@@ -1040,13 +831,11 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 			return err
 		}
 	}
-	// 无隧道任务的 MITM 实例以全局代理为回落上游——全局代理变了它们一起换。
 	if m.taskProxy != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		m.taskProxy.RefreshAll(ctx)
 		cancel()
 	}
-	// Keep the browser MCP's egress in sync with the new global proxy too.
 	m.syncBrowserMCPProxy()
 	return nil
 }
@@ -1063,11 +852,8 @@ func (m *Manager) Close() error {
 	return m.pg.Close()
 }
 
-// isTerminalStatus reports whether a task status is terminal (done/failed/timeout).
-// Package-local shim over db.IsTerminal so all server files share one definition.
 func isTerminalStatus(status string) bool { return pgdb.IsTerminal(status) }
 
-// unixOrZero returns t's unix seconds, or 0 when the time is nil.
 func unixOrZero(t *time.Time) int64 {
 	if t == nil {
 		return 0
@@ -1082,16 +868,12 @@ func unixNanoOrZero(t *time.Time) int64 {
 	return t.UnixNano()
 }
 
-// newTarpitConfig 装配批 5 B3 tarpit 熔断:预算读 settings 键 tarpit_fetch_budget
-// (每次调用现读,改设置即时生效;非法/<=0 由 guard 回落默认 40);熔断回调写一条
-// hint 节点进探索图——planner 每轮 graph overview 必读 hints(与停滞检测/P0 巡检
-// 的 hint 同一通道),提示停派该 host 方向。
 func newTarpitConfig(pg *pgdb.DB, store *pgdb.ExplorationStore) guard.TarpitConfig {
 	return guard.TarpitConfig{
 		Budget: func() int {
 			v, _, err := pg.GetSetting(settingTarpitFetchBudget)
 			if err != nil {
-				return 0 // 读取失败 → guard 回落默认预算
+				return 0
 			}
 			n, _ := strconv.Atoi(strings.TrimSpace(v))
 			return n
@@ -1112,9 +894,9 @@ func newTarpitConfig(pg *pgdb.DB, store *pgdb.ExplorationStore) guard.TarpitConf
 
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor, pg *pgdb.DB, eg *guard.EgressGuard) *Task {
 	g := guard.NewWithInterceptor(ic)
-	g.SetRoE(newRoEConfig(pg))          // RoE 范围强制(F5):worker 的 Bash/HTTP 目标与 task_scope 比对
-	g.SetEgress(eg)                     // 批 5 B2 出口审查:进程级共享指纹集合
-	g.SetTarpit(newTarpitConfig(pg, store)) // 批 5 B3 tarpit 熔断(每任务计数,重启清零)
+	g.SetRoE(newRoEConfig(pg))
+	g.SetEgress(eg)
+	g.SetTarpit(newTarpitConfig(pg, store))
 	return &Task{
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
 		Name:       pt.Name,
@@ -1136,8 +918,6 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 	}
 }
 
-// UpdateTaskMetadata changes list-only task metadata without interrupting any
-// planner, main-agent, or worker call.
 func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task, error) {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1162,8 +942,6 @@ func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task
 	return task, nil
 }
 
-// CreateTask creates a task + its exploration and makes it active.
-// timeoutSeconds is the task-level wall-clock budget (0 = 不限时).
 func (m *Manager) CreateTask(description, goal string, llmProfileID *int64, timeoutSeconds, planHeartbeatSeconds int) (*Task, error) {
 	var ids []int64
 	if llmProfileID != nil {
@@ -1191,8 +969,6 @@ func (m *Manager) CreateTaskWithOptions(description, goal string, opts pgdb.Task
 	return t, nil
 }
 
-// RenameTaskCategory persists a category name and refreshes every live task DTO
-// that references it. taskStateMu keeps this ordered with task reassignment.
 func (m *Manager) RenameTaskCategory(id int64, name string) (*pgdb.TaskCategory, error) {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1212,7 +988,6 @@ func (m *Manager) RenameTaskCategory(id int64, name string) (*pgdb.TaskCategory,
 	return category, nil
 }
 
-// DeleteTaskCategory moves all affected live tasks to the uncategorized bucket.
 func (m *Manager) DeleteTaskCategory(id int64) (bool, error) {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1233,7 +1008,6 @@ func (m *Manager) DeleteTaskCategory(id int64) (bool, error) {
 	return true, nil
 }
 
-// SetTaskCategory updates one live task without interrupting its runtime.
 func (m *Manager) SetTaskCategory(taskID string, categoryID *int64) (*pgdb.TaskCategory, error) {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1260,10 +1034,6 @@ func (m *Manager) SetTaskCategory(taskID string, categoryID *int64) (*pgdb.TaskC
 	return category, nil
 }
 
-// SetTasksCategory applies one category change to several tasks at once. The
-// database write and the in-memory refresh share taskStateMu, so a concurrent
-// single-task update cannot interleave and leave a live DTO stale. The returned
-// set holds the ids that were actually moved; callers report the rest as gone.
 func (m *Manager) SetTasksCategory(taskIDs []string, categoryID *int64) (map[string]bool, *pgdb.TaskCategory, error) {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1303,10 +1073,6 @@ func (m *Manager) SetTasksCategory(taskIDs []string, categoryID *int64) (map[str
 	return updated, category, nil
 }
 
-// DeleteCompanyWithAssets keeps the database cascade and live task handles in
-// one manager-level critical section. This closes the gap where a task could
-// commit its company scope immediately before registration and miss the
-// post-delete in-memory sweep.
 func (m *Manager) DeleteCompanyWithAssets(id int64, deleteAssets bool) (int64, error) {
 	m.companyMu.Lock()
 	defer m.companyMu.Unlock()
@@ -1330,9 +1096,6 @@ func (m *Manager) DeleteCompanyWithAssets(id int64, deleteAssets bool) (int64, e
 	return assetsDeleted, nil
 }
 
-// ReplaceTaskLLMProfiles resets a task's ordered provider chain and mirrors the
-// committed state onto the live task handle. Terminal tasks are editable too —
-// their 主 Agent 对话 keeps running on the chain after the task finishes.
 func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activeProfileID int64) (int64, error) {
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
@@ -1350,10 +1113,6 @@ func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activePr
 		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason)
 	}
 	m.mu.Unlock()
-	// 终态任务不重开额度阻塞意图:任务已经没有 worker 在跑,重开只会把它们从
-	// blocked 挪到 open——那里既没人执行,也不再满足「重跑意图」的可重跑条件,
-	// 反而变成死状态。终态任务想接着跑,走重跑意图/新增目标,那条路会把任务重新
-	// admit 回运行态。
 	if pgdb.IsTerminal(pt.Status) {
 		return 0, nil
 	}
@@ -1367,7 +1126,6 @@ func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activePr
 	return 0, nil
 }
 
-// LoadExisting rebuilds in-memory task handles from the PG task registry.
 func (m *Manager) LoadExisting() []*Task {
 	pts, err := m.pg.ListTasks()
 	if err != nil {
@@ -1403,7 +1161,6 @@ func (m *Manager) LoadExisting() []*Task {
 	return loaded
 }
 
-// SetTaskPaused persists a task's paused state.
 func (m *Manager) SetTaskPaused(id string, paused bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1424,14 +1181,6 @@ func (m *Manager) SetTaskPaused(id string, paused bool) error {
 	return nil
 }
 
-// ApplyTaskAdmission atomically commits the lifecycle fields controlled by the
-// concurrency scheduler. Keeping status, paused and queue metadata in one UPDATE
-// prevents a failed resume from leaving a task half-revived (for example running
-// but still user-paused, or dequeued without an Engine start).
-//
-// preservePosition applies only when the row is already queued. A repeated
-// admission keeps its FIFO timestamp; a task that was explicitly paused and is
-// now re-queued receives a fresh tail position.
 func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1514,10 +1263,6 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	return nil
 }
 
-// ApplyTaskPause atomically removes a task from the admission queue and records
-// the user pause. queue_mode is intentionally retained so resuming a never-run
-// bootstrap task still performs goal decomposition, but the next enqueue receives
-// a new queued_at timestamp and therefore moves to the FIFO tail.
 func (m *Manager) ApplyTaskPause(id string) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1550,7 +1295,6 @@ func (m *Manager) ApplyTaskPause(id string) error {
 	return nil
 }
 
-// EnqueueTask persists the concurrency hold and syncs the in-memory handle.
 func (m *Manager) EnqueueTask(id, mode string) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1590,8 +1334,6 @@ func (m *Manager) EnqueueTask(id, mode string) error {
 	return nil
 }
 
-// DequeueTask removes the concurrency hold. clearMode=false is used when a user
-// pauses a queued task so a later resume still knows whether bootstrap is needed.
 func (m *Manager) DequeueTask(id string, clearMode bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1616,7 +1358,6 @@ func (m *Manager) DequeueTask(id string, clearMode bool) error {
 	return nil
 }
 
-// TaskStatus returns a task's current in-memory status (empty if unknown).
 func (m *Manager) TaskStatus(id string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1626,8 +1367,6 @@ func (m *Manager) TaskStatus(id string) string {
 	return ""
 }
 
-// StampTaskFirstRun stamps first_run_at + deadline_at on the first real run (idempotent
-// in DB) and mirrors deadline_at on the live handle. Returns the deadline unix (0 = 不限).
 func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
@@ -1662,9 +1401,6 @@ func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
 	return dlUnix, nil
 }
 
-// SetTaskStatusGuarded sets a TERMINAL status only if the task isn't already terminal
-// (resolves the completed↔timeout race — first terminal writer wins). Reflects the
-// won status on the live handle. won=false means another terminal already stuck.
 func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) {
 	prev := m.TaskStatus(id)
 	m.taskStateMu.Lock()
@@ -1689,14 +1425,10 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	}
 	m.mu.Unlock()
 	m.taskStateMu.Unlock()
-	// After releasing taskStateMu: clearing hits PostgreSQL, and a slow DELETE
-	// must not hold the lifecycle write lock.
 	m.clearLogsOnTaskEnd(prev, status)
 	return true, nil
 }
 
-// SetTaskStatus persists a task's lifecycle status (e.g. "done") and reflects it
-// on the in-memory handle so the derived DTO status shows it without a reload.
 func (m *Manager) SetTaskStatus(id, status string) error {
 	prev := m.TaskStatus(id)
 	m.taskStateMu.Lock()
@@ -1713,8 +1445,6 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 	if t := m.tasks[id]; t != nil {
 		t.updateLifecycle(func(state *taskLifecycleState) {
 			state.Status = status
-			// Mirror the DB's completed_at stamp on the live handle so the DTO shows
-			// the finish time without a reload (terminal -> stamp once; else clear).
 			if pgdb.IsTerminal(status) {
 				if state.CompletedAt == 0 {
 					state.CompletedAt = time.Now().Unix()
@@ -1730,26 +1460,17 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 	return nil
 }
 
-// LogsClearOnTaskEnd reports whether a finished task wipes the backend log store
-// (settings.clear_logs_on_task_end, default on).
 func (m *Manager) LogsClearOnTaskEnd() bool {
 	if m.pg == nil {
-		return false // no DB → no persisted log to clear
+		return false
 	}
 	return m.pg.GetBool(settingClearLogsOnTaskEnd, true)
 }
 
-// shouldClearLogsOnTerminal reports whether a status change crosses INTO a
-// terminal state (done / failed / timeout) and should therefore wipe the log
-// store. Success and failure are treated alike; rewrites of an already-terminal
-// status (completed_at bookkeeping, re-run of a done task) do not clear again.
 func shouldClearLogsOnTerminal(prev, next string) bool {
 	return pgdb.IsTerminal(next) && !pgdb.IsTerminal(prev)
 }
 
-// clearLogsOnTaskEnd wipes the backend log (ring + server_logs + open /logs
-// pages) when a task reaches a terminal state, so a finished run leaves no log
-// trail behind. Gated by settings.clear_logs_on_task_end.
 func (m *Manager) clearLogsOnTaskEnd(prev, next string) {
 	if !shouldClearLogsOnTerminal(prev, next) {
 		return
@@ -1765,11 +1486,6 @@ func (m *Manager) clearLogsOnTaskEnd(prev, next string) {
 	log.Printf("[logs] task 终态 %s，已自动清空后端日志 %d 行", next, deleted)
 }
 
-// DeleteTask removes a task and optionally its related global data. Traffic has
-// no task-id column, so related exchanges are resolved by exact hosts from the
-// task's asset rows. Files are staged before the database operation; traffic is
-// staged while PostgreSQL excludes asset/anchor writers. Both are restored on a
-// database failure and purged only after its commit.
 func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResult, error) {
 	result := DeleteTaskResult{Deleted: id}
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1821,10 +1537,6 @@ func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResul
 	result.FindingsDeleted = dbResult.FindingsDeleted
 	result.LLMRecordsDeleted = dbResult.LLMRecordsDeleted
 
-	// PostgreSQL is now authoritative: finalize the staged external deletion and
-	// forget the live task even if a final purge reports an error. Such errors are
-	// typed so the HTTP layer can still tear down the task runtime instead of
-	// incorrectly reviving a task whose database row is already gone.
 	var finalizeErrs []error
 	if trafficStage != nil {
 		if err := trafficStage.Commit(); err != nil {
@@ -1843,8 +1555,6 @@ func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResul
 	return result, nil
 }
 
-// taskDeleteCommittedError means PostgreSQL deletion succeeded but purging one
-// of the recoverable staging directories failed. The task must stay deleted.
 type taskDeleteCommittedError struct{ err error }
 
 func (e *taskDeleteCommittedError) Error() string {
@@ -1855,8 +1565,6 @@ func (e *taskDeleteCommittedError) Unwrap() error { return e.err }
 
 func rollbackTaskDelete(cause error, trafficStage *traffic.HostDeleteStage, fileStage *taskFileDeleteStage) error {
 	errs := []error{cause}
-	// Reverse the preparation order. Both restorations are attempted even if the
-	// first one fails, and errors.Join preserves the original PostgreSQL error.
 	if trafficStage != nil {
 		if err := trafficStage.Rollback(); err != nil {
 			errs = append(errs, fmt.Errorf("restore traffic after task delete failure: %w", err))
@@ -1906,9 +1614,6 @@ type taskFileDeleteStage struct {
 	done     bool
 }
 
-// stageTaskFiles atomically renames the task workspace and owned transcripts to
-// a same-filesystem staging directory. The trailing dash in the transcript
-// prefix is significant: exploration 12 must not match exploration 123.
 func stageTaskFiles(dataDir, taskID string, explorationID int64) (*taskFileDeleteStage, error) {
 	stage := &taskFileDeleteStage{}
 	var targets []string
@@ -2003,7 +1708,6 @@ func (s *taskFileDeleteStage) rollback() error {
 	return errors.Join(errs...)
 }
 
-// deleteTaskFiles retains the standalone helper contract used by focused tests.
 func deleteTaskFiles(dataDir, taskID string, explorationID int64) (bool, error) {
 	stage, err := stageTaskFiles(dataDir, taskID, explorationID)
 	if err != nil {
@@ -2023,7 +1727,6 @@ func (m *Manager) Task(id string) (*Task, bool) {
 	return t, ok
 }
 
-// ActiveTask returns the currently active task (or nil).
 func (m *Manager) ActiveTask() *Task {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -2033,7 +1736,6 @@ func (m *Manager) ActiveTask() *Task {
 	return m.tasks[m.active]
 }
 
-// SetActive switches the active task. Returns false if the id is unknown.
 func (m *Manager) SetActive(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2059,8 +1761,6 @@ func (m *Manager) List() []*Task {
 	for _, t := range m.tasks {
 		out = append(out, t)
 	}
-	// 置顶任务优先，组内按置顶时间倒序；普通任务按 id 倒序。m.tasks 是 map，
-	// 每次轮询都必须重排，id 则为同刻创建任务提供稳定且唯一的兜底顺序。
 	sort.Slice(out, func(i, j int) bool {
 		iState := out[i].lifecycleSnapshot()
 		jState := out[j].lifecycleSnapshot()
@@ -2077,8 +1777,6 @@ func (m *Manager) List() []*Task {
 	return out
 }
 
-// Notify signals that the asset/exploration graph changed (debounced consumer
-// wakes the planner). Non-blocking.
 func (t *Task) Notify() {
 	select {
 	case t.notify <- struct{}{}:
@@ -2086,10 +1784,6 @@ func (t *Task) Notify() {
 	}
 }
 
-// NotifyDone is Notify plus a hint: a worker just finished intentID and that is
-// what triggered this wake-up. The planner reads the accumulated triggers next
-// round so it can spell out which intent finished (+ its output). Events pile up
-// (debounce) until the round drains them via drainTriggers.
 func (t *Task) NotifyDone(intentID int64) {
 	if intentID > 0 {
 		t.trigMu.Lock()
@@ -2099,8 +1793,6 @@ func (t *Task) NotifyDone(intentID int64) {
 	t.Notify()
 }
 
-// NotifyFinding records that a worker reported a finding on intentID (summary),
-// then wakes the planner — so the round spells out which intent found what.
 func (t *Task) NotifyFinding(intentID int64, summary string) {
 	t.trigMu.Lock()
 	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "finding", IntentID: intentID, Detail: summary})
@@ -2108,12 +1800,6 @@ func (t *Task) NotifyFinding(intentID int64, summary string) {
 	t.Notify()
 }
 
-// NotifyGoal records that one OR MORE goals were added in a single set_goals call —
-// by the human via the main agent — then wakes the planner, so the next round spells
-// out "人新增了 N 个目标：…" instead of the planner having to spot new open goals in
-// the overview. One call → one trigger event (set_goals 的一次批量算一条，不逐条刷屏).
-// The event survives an early-returning terminal round (drain happens after the gate),
-// so a set_goals that revives a done task still surfaces it once the task is running.
 func (t *Task) NotifyGoal(texts []string) {
 	if len(texts) == 0 {
 		return
@@ -2124,9 +1810,6 @@ func (t *Task) NotifyGoal(texts []string) {
 	t.Notify()
 }
 
-// NotifyGoalDeleted records that the human deleted a goal (via 总览的目标管理), then
-// wakes the planner so the next round spells out which goal was removed. The event
-// survives an early-returning terminal round (drain happens after the gate).
 func (t *Task) NotifyGoalDeleted(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -2138,9 +1821,6 @@ func (t *Task) NotifyGoalDeleted(text string) {
 	t.Notify()
 }
 
-// NotifyGoalEdited records that the human edited a goal (via 总览的目标管理), then wakes
-// the planner so the next round spells out the old→new change. The event survives an
-// early-returning terminal round (drain happens after the gate).
 func (t *Task) NotifyGoalEdited(oldText, newText string) {
 	oldText, newText = strings.TrimSpace(oldText), strings.TrimSpace(newText)
 	if newText == "" {
@@ -2152,11 +1832,6 @@ func (t *Task) NotifyGoalEdited(oldText, newText string) {
 	t.Notify()
 }
 
-// NotifyCancelled records that the human deleted intentID (reason = 删除原因), then
-// wakes the planner so the next round spells out which intent was removed and why.
-// summary is the intent's text captured before deletion — needed for hard delete,
-// where the node is gone by the time the planner reads the trigger. Applies to both
-// soft (state='deleted') and hard (physical cascade) delete.
 func (t *Task) NotifyCancelled(intentID int64, summary, reason string) {
 	if intentID > 0 {
 		t.trigMu.Lock()
@@ -2166,7 +1841,6 @@ func (t *Task) NotifyCancelled(intentID int64, summary, reason string) {
 	t.Notify()
 }
 
-// drainTriggers returns and clears the trigger events accumulated since the last round.
 func (t *Task) drainTriggers() []agent.TriggerEvent {
 	t.trigMu.Lock()
 	defer t.trigMu.Unlock()

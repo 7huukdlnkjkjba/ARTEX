@@ -172,7 +172,7 @@ func TestBuildTopologyEdgeEndpoints(t *testing.T) {
 		{ID: 21, Kind: "socks", ViaSessionID: 11, State: db.TunnelAlive},
 		{ID: 22, Kind: "portfwd", ViaSessionID: 11, TargetHost: "10.0.0.5", TargetPort: 3306, State: db.TunnelAlive}, // 命中资产
 		{ID: 23, Kind: "portfwd", ViaSessionID: 11, TargetHost: "10.0.0.8", TargetPort: 445, State: db.TunnelAlive},  // 合成 pf 节点
-		{ID: 24, Kind: "socks", ViaSessionID: 99, State: db.TunnelAlive},                                            // 会话不在视图 → 跳过
+		{ID: 24, Kind: "socks", ViaSessionID: 99, State: db.TunnelAlive},                                             // 会话不在视图 → 跳过
 	}
 	topo := buildTopology(assets, recs, tuns, "")
 

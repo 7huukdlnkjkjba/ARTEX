@@ -74,7 +74,7 @@ func (s *Server) recordStageEvent(ev stage.Event) {
 	if _, err := t.Store.AppendActivity(db.Activity{
 		Worker: "system", Kind: "text", Tool: "stage_share",
 		Summary: summary,
-		Detail:  fmt.Sprintf("token=%s name=%s size=%d one_shot=%v expires_at=%s remote=%s bytes=%d hits=%d",
+		Detail: fmt.Sprintf("token=%s name=%s size=%d one_shot=%v expires_at=%s remote=%s bytes=%d hits=%d",
 			e.Token, e.Name, e.Size, e.OneShot, e.ExpiresAt.Format(time.RFC3339), ev.Remote, ev.Bytes, e.Hits),
 	}); err != nil {
 		log.Printf("[stage] activity 写入失败(task=%s): %v", e.TaskID, err)
@@ -101,12 +101,12 @@ func (s *Server) stageDownload(w http.ResponseWriter, r *http.Request) {
 // --- 管理 API(JWT 之后,供 worker 工具与 UI 使用) ---
 
 type stageCreateReq struct {
-	Path          string `json:"path"`            // 平台侧已有文件(与 content 二选一)
-	Name          string `json:"name"`            // content 模式必填
-	ContentBase64 string `json:"content_base64"`  // content 模式
-	TTLMinutes    int    `json:"ttl_minutes"`     // 0 = 默认 15 分钟,上限 120
-	OneShot       bool   `json:"one_shot"`        // 首次成功完整下载后即焚
-	TaskID        string `json:"task_id"`         // 归属任务(activity 记账)
+	Path          string `json:"path"`           // 平台侧已有文件(与 content 二选一)
+	Name          string `json:"name"`           // content 模式必填
+	ContentBase64 string `json:"content_base64"` // content 模式
+	TTLMinutes    int    `json:"ttl_minutes"`    // 0 = 默认 15 分钟,上限 120
+	OneShot       bool   `json:"one_shot"`       // 首次成功完整下载后即焚
+	TaskID        string `json:"task_id"`        // 归属任务(activity 记账)
 }
 
 func (s *Server) stageCreate(w http.ResponseWriter, r *http.Request) {

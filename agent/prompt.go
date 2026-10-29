@@ -63,7 +63,7 @@ func renderSystem(agentKey, def string, vars any) string {
 // 变体模板渲染失败(引用了目录外变量)同样退回 key 本身,绝不出半渲染提示词。
 func renderSystemVariant(agentKey, variant, def string, vars any) string {
 	if variant != "" && PromptOverride != nil {
-		if t, ok := PromptOverride(agentKey+"."+variant); ok && t != "" {
+		if t, ok := PromptOverride(agentKey + "." + variant); ok && t != "" {
 			if out, err := renderTmpl(t, vars); err == nil {
 				return out
 			}

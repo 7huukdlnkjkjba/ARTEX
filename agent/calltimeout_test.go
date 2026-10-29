@@ -17,8 +17,8 @@ func TestCallTimeoutFromEnv(t *testing.T) {
 		set  bool
 		want time.Duration
 	}{
-		{set: false, want: 600 * time.Second},   // 未设 → 默认 600s
-		{env: "0", set: true, want: 0},          // 0 = 不限
+		{set: false, want: 600 * time.Second}, // 未设 → 默认 600s
+		{env: "0", set: true, want: 0},        // 0 = 不限
 		{env: "30", set: true, want: 30 * time.Second},
 		{env: " 120 ", set: true, want: 120 * time.Second},
 		{env: "abc", set: true, want: 600 * time.Second}, // 非法 → 默认

@@ -183,7 +183,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		opts.Hooks = m.guard.Hooks()
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per segment
-		opts.Transcript = m.tx		// Segment 0 keeps the legacy "exp%d-main" name so existing transcripts still
+		opts.Transcript = m.tx // Segment 0 keeps the legacy "exp%d-main" name so existing transcripts still
 		// load; each new session (seg>=1) gets its own file for a clean context.
 		opts.SessionID = fmt.Sprintf("exp%d-main", ts.ID())
 		if mainSeg > 0 {

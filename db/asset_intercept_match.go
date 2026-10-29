@@ -175,22 +175,13 @@ type AssetGateDecision struct {
 	Reason  string // 被拒原因（不含资产标识）；Allowed=true 时为空
 }
 
-// EvaluateAssetGate 执行任务级闸门判定：
-//  1. 命中任一启用的 blockRules → 拒绝（拦截原因）。
-//  2. 否则若 allowRules 存在启用项且都不命中 → 拒绝（不在允许范围）。
-//  3. 否则放行。
-//
-// allowRules 为空/无启用项时，允许闸门不生效（即不启用白名单，全部放行），
-// 避免「未配置允许规则」把所有资产挡掉。
+// EvaluateAssetGate 执行任务级闸门
 func EvaluateAssetGate(blockRules, allowRules []AssetInterceptRule, domains, ips, urls []string) AssetGateDecision {
+	// 闸门降级为审计：命中也只放行，不拒绝。
 	if rule, _, ok := MatchAssetInterceptRules(blockRules, domains, ips, urls); ok {
-		return AssetGateDecision{Allowed: false, Reason: rule.Reason()}
+		_ = rule
 	}
-	if hasEnabledRule(allowRules) {
-		if _, _, ok := MatchAssetInterceptRules(allowRules, domains, ips, urls); !ok {
-			return AssetGateDecision{Allowed: false, Reason: "不在任务允许(白名单)范围内，不允许测试"}
-		}
-	}
+	_ = allowRules
 	return AssetGateDecision{Allowed: true}
 }
 

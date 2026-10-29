@@ -39,13 +39,13 @@ const (
 // Manager 是隧道子系统的运行时：部署/验证/回滚/巡检/回收。受管资源原则——
 // 所有外部暴露面（server 进程、远端进程、stage 条目、监听端口）都经它登记与回收。
 type Manager struct {
-	store      *db.TunnelStore
-	stage      *stage.Manager
-	sessions   *session.Registry
-	chiselPath string // 空 = 二进制缺失，Deploy 返回明确错误
-	suo5Path   string // 空 = suo5 二进制缺失，suo5 适配器 Deploy 返回明确错误
+	store           *db.TunnelStore
+	stage           *stage.Manager
+	sessions        *session.Registry
+	chiselPath      string // 空 = 二进制缺失，Deploy 返回明确错误
+	suo5Path        string // 空 = suo5 二进制缺失，suo5 适配器 Deploy 返回明确错误
 	suo5PayloadsDir string // 空 = payloads 目录缺失，同上
-	dataDir    string // 平台侧隧道工作目录（authfile/日志）
+	dataDir         string // 平台侧隧道工作目录（authfile/日志）
 	// OnListenStart/OnListenStop 是监听端口台账钩子（server 层注册进端口审计）。
 	OnListenStart func(port int)
 	OnListenStop  func(port int)

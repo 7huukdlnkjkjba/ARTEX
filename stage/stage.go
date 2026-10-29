@@ -60,7 +60,7 @@ type Entry struct {
 	ExpiresAt time.Time `json:"expires_at"`
 	OneShot   bool      `json:"one_shot"`
 	TaskID    string    `json:"task_id,omitempty"`
-	Hits      int64     `json:"hits"`        // 成功完整下载次数
+	Hits      int64     `json:"hits"`         // 成功完整下载次数
 	Bytes     int64     `json:"bytes_served"` // 累计实际写出字节数（含不完整下载）
 	CreatedAt time.Time `json:"created_at"`
 }

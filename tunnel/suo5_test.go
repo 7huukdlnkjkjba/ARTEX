@@ -12,9 +12,9 @@ func TestSuo5PayloadFile(t *testing.T) {
 		want string
 	}{
 		{"http_php", "suo5.php"},
-		{"http_phpcmd", "suo5.php"},  // PHP 命令马
-		{"http_phpenc", "suo5.php"},  // 加密马用明文 php payload
-		{"php", "suo5.php"},          // 直接给 lang 也接受
+		{"http_phpcmd", "suo5.php"}, // PHP 命令马
+		{"http_phpenc", "suo5.php"}, // 加密马用明文 php payload
+		{"php", "suo5.php"},         // 直接给 lang 也接受
 		{"http_jsp", "suo5.jsp"},
 		{"http_jspenc", "suo5.jsp"},
 		{"http_aspx", "suo5.aspx"},

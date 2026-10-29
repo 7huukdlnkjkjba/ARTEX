@@ -16,16 +16,16 @@ func TestScopeMatcherDomain(t *testing.T) {
 		host string
 		want ScopeVerdict
 	}{
-		{"example.com", ScopeIn},            // 精确匹配,大小写不敏感
-		{"EXAMPLE.COM", ScopeIn},            //
-		{"www.example.com", ScopeIn},        // 子域
-		{"a.b.example.com", ScopeIn},        // 多级子域
-		{"example.com.", ScopeIn},           // 末尾点
-		{"www.EXAMPLE.com.", ScopeIn},       // 大小写+末尾点混合
-		{"notexample.com", ScopeOut},        // 后缀不等于子域
-		{"example.com.evil.com", ScopeOut},  // 域名做前缀不算
-		{"other.org", ScopeOut},             //
-		{"example.com:8443", ScopeIn},       // host:port 去端口
+		{"example.com", ScopeIn},           // 精确匹配,大小写不敏感
+		{"EXAMPLE.COM", ScopeIn},           //
+		{"www.example.com", ScopeIn},       // 子域
+		{"a.b.example.com", ScopeIn},       // 多级子域
+		{"example.com.", ScopeIn},          // 末尾点
+		{"www.EXAMPLE.com.", ScopeIn},      // 大小写+末尾点混合
+		{"notexample.com", ScopeOut},       // 后缀不等于子域
+		{"example.com.evil.com", ScopeOut}, // 域名做前缀不算
+		{"other.org", ScopeOut},            //
+		{"example.com:8443", ScopeIn},      // host:port 去端口
 	}
 	for _, c := range cases {
 		if got := m.Check(c.host); got != c.want {

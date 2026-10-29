@@ -120,7 +120,7 @@ func BuiltinPromptSeeds() map[string]string {
 		// 正文,见 worker.go workerSystem)。key 带 ".intranet" 后缀,seedBuiltins
 		// 里有同名 agents 行(db/db.go),seedPrompts 才能把正文种进 agent_prompts。
 		"worker.intranet": workerIntranetDefaultTmpl,
-		"auto":      autoDefaultTmpl,
-		"pentest":   pentestDefaultTmpl,
+		"auto":            autoDefaultTmpl,
+		"pentest":         pentestDefaultTmpl,
 	}
 }

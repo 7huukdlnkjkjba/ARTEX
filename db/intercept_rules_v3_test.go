@@ -37,14 +37,14 @@ func TestBuiltinHTTPServerRulePatterns(t *testing.T) {
 	}
 	misses := []string{
 		"curl http://10.0.0.2:8787/s/abc/tool.sh -o /tmp/tool.sh", // stage_share 的正常拉取
-		"python3 exploit.py",                    // 普通脚本
-		"php -r 'echo 1;'",                      // php 单行
-		"php artisan serve",                     // 框架子命令,不是 php -S
-		"gem install httpd-tools",               // 含 httpd 字样
-		"ruby script.rb",                        // 普通 ruby
-		"npm install",                           // npm 不是 npx serve
-		"cat httpd.conf",                        // 配置文件
-		"nmap -p 80,8000-9000 10.0.0.2",         // 常规扫描
+		"python3 exploit.py",            // 普通脚本
+		"php -r 'echo 1;'",              // php 单行
+		"php artisan serve",             // 框架子命令,不是 php -S
+		"gem install httpd-tools",       // 含 httpd 字样
+		"ruby script.rb",                // 普通 ruby
+		"npm install",                   // npm 不是 npx serve
+		"cat httpd.conf",                // 配置文件
+		"nmap -p 80,8000-9000 10.0.0.2", // 常规扫描
 	}
 	var rules []*regexp.Regexp
 	for _, r := range builtinHTTPServerRules {

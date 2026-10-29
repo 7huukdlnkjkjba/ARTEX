@@ -29,7 +29,7 @@ type egressFingerprint struct {
 // EgressGuard 是敏感指纹集合,进程内共享(server 装配时注册,所有任务的 guard
 // 引用同一份,profile 变更重新注册即对全部任务生效)。并发安全。
 type EgressGuard struct {
-	mu sync.RWMutex
+	mu  sync.RWMutex
 	fps []egressFingerprint
 	// byLen 是按原文长度分组的指纹索引,Check 时只需对文本里每个长度各滑一次窗。
 	byLen map[int][]int // length → fps 下标

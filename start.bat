@@ -29,12 +29,15 @@ if not exist "%LOGS%" mkdir "%LOGS%" >nul 2>&1
 
 rem ---------- 1. PostgreSQL (127.0.0.1:5433) ----------
 rem 输出必须重定向到 nul/文件，不能接管道: postgres 会继承管道句柄，导致等待不返回。
-"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" status >nul 2>&1
+rem 用 pg_isready 判断"是否可连"：数据库以 Windows 服务(ARTEX-PG)运行时，
+rem pg_ctl status 拿不到 SYSTEM 进程信息，会误报 "no server running" 并触发重复启动。
+"%PGBIN%\pg_isready.exe" -h 127.0.0.1 -p 5433 >nul 2>&1
 if errorlevel 1 (
   echo [pg] 正在启动 ...
   "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%LOGS%\pg.log" -w -t 60 start >nul 2>&1
   if errorlevel 1 (
     echo [错误] PostgreSQL 启动失败, 详见 "%LOGS%\pg.log"
+    echo        若已注册服务，请用管理员执行: sc start ARTEX-PG
     goto :fail
   )
   echo [pg] 已启动 127.0.0.1:5433

@@ -40,7 +40,7 @@ func TestAnchorFindingAsset(t *testing.T) {
 		{
 			name: "路径段边界不前缀匹配",
 			text: "http://example.com/apisix 未授权访问", // /api 不命中 /apisix
-			want: 4,                              // 落到 service
+			want: 4,                                 // 落到 service
 		},
 		{
 			name: "service 回退",
@@ -55,7 +55,7 @@ func TestAnchorFindingAsset(t *testing.T) {
 		{
 			name: "https/http 区分:http service 不匹配 https URL",
 			text: "https://example.com/login 弱口令", // https endpoint /api 不前缀匹配 /login
-			want: 8,                                 // http service 端口/scheme 不符 → root_domain
+			want: 8,                               // http service 端口/scheme 不符 → root_domain
 		},
 		{
 			name: "显式端口不匹配默认端口 service",

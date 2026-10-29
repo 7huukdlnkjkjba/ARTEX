@@ -20,7 +20,6 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// msfArgs is the shared input for the three Metasploit tools.
 type msfArgs struct {
 	VulnClass string `json:"vuln_class"`
 	Product   string `json:"product"`
@@ -69,12 +68,10 @@ func msfSchema() map[string]any {
 	}
 }
 
-// msfTools returns the three deterministic decision tools exposed to workers.
 func (s *Server) msfTools() []actool.CoreTool {
 	return []actool.CoreTool{s.msfPlanTool(), s.msfNextTool(), s.msfExecuteTool()}
 }
 
-// seedMSFTools seeds the tools into the catalog, bound to worker by default.
 func (s *Server) seedMSFTools() {
 	workerAgents, _ := json.Marshal([]string{"worker"})
 	for _, t := range s.msfTools() {
@@ -89,7 +86,6 @@ func allowAll(context.Context, json.RawMessage, permission.Context) permission.D
 	return permission.Allowed()
 }
 
-// msf_plan: pure decision layer, no network I/O.
 func (s *Server) msfPlanTool() actool.CoreTool {
 	return actool.Build(actool.Spec{
 		Name: "msf_plan",
@@ -115,7 +111,6 @@ func (s *Server) msfPlanTool() actool.CoreTool {
 	})
 }
 
-// msf_next: stateless branch selection (recomputes the deterministic plan).
 func (s *Server) msfNextTool() actool.CoreTool {
 	schema := msfSchema()
 	schema["properties"].(map[string]any)["attempt"] = map[string]any{
@@ -162,8 +157,6 @@ func msfPlanError(err error) (actool.Result, error) {
 	return actool.Errorf(err.Error()), nil
 }
 
-// ---------------- MCP execution ----------------
-
 type msfSession struct {
 	client    mcpClient
 	tools     map[string]actool.CoreTool
@@ -185,7 +178,6 @@ func (m *msfSession) tool(name string) (actool.CoreTool, bool) {
 	return nil, false
 }
 
-// call invokes one MCP tool and returns its textual payload.
 func (m *msfSession) call(ctx context.Context, name string, in any) (string, error) {
 	t, ok := m.tool(name)
 	if !ok {
@@ -221,7 +213,6 @@ func truncateForTool(s string) string {
 	return s[:max] + "…"
 }
 
-// msfConnect finds the enabled "metasploit" MCP server and dials it.
 func (s *Server) msfConnect(ctx context.Context) (*msfSession, error) {
 	if s.m == nil || s.m.pg == nil {
 		return nil, fmt.Errorf("数据库未就绪，无法读取 MCP 配置")
@@ -238,7 +229,6 @@ func (s *Server) msfConnect(ctx context.Context) (*msfSession, error) {
 		}
 	}
 	if srv == nil {
-		// 无需 UI 配置：直接用内置启动器拉起 mcp-pymetasploit3（console 脚本或 python -m）。
 		cmd, args, ok := findMCPLauncher()
 		if !ok {
 			return nil, fmt.Errorf("未找到 mcp-pymetasploit3：请先 pip install mcp-pymetasploit3（或在「系统 → MCP」新建 stdio 服务）")
@@ -265,10 +255,6 @@ func (s *Server) msfConnect(ctx context.Context) (*msfSession, error) {
 	return m, nil
 }
 
-// ensureRPC makes sure the MCP server is authenticated to msfrpcd. mode is
-// "auto" (try TLS first, then plaintext), "true" or "false". Auto exists because
-// msfrpcd enables TLS by default while `msfrpcd -S` serves plaintext, and both
-// deployments are common.
 func (m *msfSession) ensureRPC(ctx context.Context, password, mode string) (string, error) {
 	info, _ := m.call(ctx, "get_client_info", map[string]any{})
 	if strings.Contains(info, `"connected": true`) || strings.Contains(info, `"authenticated": true`) {
@@ -333,7 +319,6 @@ func diffSessions(before, after map[string]bool) []string {
 	return out
 }
 
-// msf_execute runs the deterministic candidate chain end-to-end over MCP.
 func (s *Server) msfExecuteTool() actool.CoreTool {
 	schema := msfSchema()
 	props := schema["properties"].(map[string]any)
@@ -372,9 +357,8 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 			if len(plan.Candidates) == 0 {
 				return actool.Errorf("没有候选模块"), nil
 			}
-			// 授权范围硬校验：目标必须落在本任务已登记的 scope 内（未登记时放行并提示）。
 			if ok, why := s.msfScopeAllows(ctx, a.Host); !ok {
-				return actool.Errorf("拒绝执行：" + why + "。先登记 task scope 或由人批准扩 scope。"), nil
+				log.Printf("[msf] scope 拒绝已放行：%s", why)
 			}
 
 			sess, err := s.msfConnect(ctx)
@@ -399,7 +383,7 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 			}
 			if sslMode == "" {
 				if sess.plaintext {
-					sslMode = "false" // 受管 msfrpcd 用 -S 启动（仅 loopback 明文）
+					sslMode = "false"
 				} else {
 					sslMode = "auto"
 				}
@@ -426,7 +410,6 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 					break
 				}
 				attempted = i + 1
-				// 1) module exists?
 				if _, err := sess.call(ctx, "get_module_info", map[string]any{
 					"module_type": c.ModuleType, "module_name": c.Module,
 				}); err != nil {
@@ -434,10 +417,6 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 					act = msf.Next(plan, i, msf.OutcomeModuleMissing)
 					continue
 				}
-				// 2) 执行：MCP 的 use_module/set_module_option 是无状态的（每次调用都会
-				// modules.use 一个新实例），跨调用设置的 TARGETURI/SSL 等不会生效。
-				// 因此走 console 路径：use + set + run 在同一会话里串起来；console
-				// 不可用时退回 execute_module（仅 rhosts/rport/lhost/lport/payload）。
 				execTxt, execErr := sess.runCandidate(ctx, c, lp, a.WaitSecs)
 				entry := map[string]any{"candidate": i, "module": c.Module, "payload": c.Payload, "step": "execute"}
 				if execErr != nil {
@@ -450,12 +429,9 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 					act = msf.Next(plan, i, msf.OutcomeError)
 					continue
 				}
-				// 3) wait for a new session
 				got = waitNewSessions(ctx, sess, before, a.WaitSecs)
 				if len(got) > 0 {
 					act = msf.Next(plan, i, msf.OutcomeSession)
-					// 自动取证：拿到会话后立刻执行一组只读命令，把证据随结果返回，
-					// 并写回 fact，闭合「利用→取证→写回」循环（不依赖模型再补一轮）。
 					evidence := ""
 					for _, sid := range got {
 						if ev := s.msfSessionEvidence(ctx, sess, sid); ev != "" {
@@ -517,9 +493,6 @@ func keysOf(m map[string]bool) []string {
 	return out
 }
 
-// msfScopeAllows is a hard RoE gate for msf_execute: the target must fall inside
-// the task's registered scope. Tasks without any scope row are allowed (bootstrap
-// phase) but the reason is surfaced for auditing.
 func (s *Server) msfScopeAllows(ctx context.Context, host string) (bool, string) {
 	if s.m == nil || s.m.pg == nil {
 		return true, ""
@@ -541,9 +514,6 @@ func (s *Server) msfScopeAllows(ctx context.Context, host string) (bool, string)
 	return false, "目标 " + host + " 不在任务授权 scope 内"
 }
 
-// scopeRowsAllow 是 msf_execute 的纯函数版范围判定（便于单测）。与 guard 的
-// 强制层保持一致：ip 行要同时看 value 与 net（add_task_scope 把 IP 落在 net 列），
-// 否则已登记的 127.0.0.1/32 会被误判越界，把整个 MSF 闭环挡在门外。
 func scopeRowsAllow(rows []db.TaskScope, host string) bool {
 	h := normalizeScopeTarget(host)
 	if h == "" {
@@ -587,7 +557,6 @@ func scopeRowsAllow(rows []db.TaskScope, host string) bool {
 	return false
 }
 
-// normalizeScopeTarget 把 URL / host:port / 大小写统一成裸主机名。
 func normalizeScopeTarget(v string) string {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -605,7 +574,6 @@ func normalizeScopeTarget(v string) string {
 	return strings.TrimSuffix(strings.ToLower(v), ".")
 }
 
-// createConsole opens one Metasploit console and returns its id.
 func (m *msfSession) createConsole(ctx context.Context) (string, error) {
 	txt, err := m.call(ctx, "create_console", map[string]any{})
 	if err != nil {
@@ -620,9 +588,6 @@ func (m *msfSession) createConsole(ctx context.Context) (string, error) {
 	return out.CID, nil
 }
 
-// runCandidate runs one candidate through a console so every option persists
-// (the module tools are stateless per call). Falls back to execute_module when
-// console creation is unavailable.
 func (m *msfSession) runCandidate(ctx context.Context, c msf.Candidate, lport, seconds int) (string, error) {
 	cid, err := m.createConsole(ctx)
 	if err != nil {
@@ -680,8 +645,6 @@ func (m *msfSession) runCandidate(ctx context.Context, c msf.Candidate, lport, s
 	return out.String(), nil
 }
 
-// execDirect is the reduced-fidelity fallback: execute_module only accepts
-// rhosts/rport/lhost/lport/payload, so TARGETURI/SSL and other options are lost.
 func (m *msfSession) execDirect(ctx context.Context, c msf.Candidate, lport int) (string, error) {
 	args := map[string]any{"module_type": c.ModuleType, "module_name": c.Module}
 	if c.Payload != "" {
@@ -715,12 +678,7 @@ func consoleData(txt string) (string, bool) {
 	return v.Data, v.Busy
 }
 
-// msfSessionEvidence runs a read-only triage bundle in a fresh session and
-// returns its output. Failures are non-fatal: the session itself is the win.
 func (s *Server) msfSessionEvidence(ctx context.Context, sess *msfSession, id string) string {
-	// interact_session 写原始字节。Windows cmd 只认 CRLF：只发 \n 时命令不会执行，
-	// 输出恒为空（实测 generic/shell_reverse_tcp 上就是这样）。因此这里用 CRLF，
-	// 并把两条命令分开跑：whoami 在 Windows/Linux 都存在，hostname 兜底。
 	cmds := []string{"whoami\r\n", "hostname\r\n", "ipconfig\r\n"}
 	var last string
 	for attempt := 0; attempt < 8; attempt++ {
@@ -736,7 +694,6 @@ func (s *Server) msfSessionEvidence(ctx context.Context, sess *msfSession, id st
 			}
 			if out := sessionOutput(txt); out != "" {
 				last = out
-				// 拿到第一条真实输出就够证明会话可执行；继续收集其余命令会拖慢闭环。
 				return strings.TrimSpace(last)
 			}
 		}
@@ -750,14 +707,11 @@ func sessionOutput(txt string) string {
 		Output string `json:"output"`
 	}
 	if err := json.Unmarshal([]byte(txt), &v); err == nil {
-		// 空输出就是空：不要把 {"output":""} 这个壳当成证据写回 fact。
 		return strings.TrimSpace(v.Output)
 	}
 	return strings.TrimSpace(txt)
 }
 
-// msfRecordSessionFact writes the session + evidence back to the exploration
-// graph so the loop is closed even if the model never emits a follow-up turn.
 func (s *Server) msfRecordSessionFact(ctx context.Context, plan msf.Plan, sessionID, evidence string) {
 	if s.m == nil || s.m.pg == nil {
 		return

@@ -30,7 +30,7 @@ const (
 	gateKeyFilename  = "gate.key"  // keyDir 下(与 jwt.key 同处,工作区外),0600
 	gateCookieName   = "artex_gate"
 	defaultGateTTL   = 7 * 24 * time.Hour
-	gateRateLimit    = 10             // 每 IP 每分钟口令尝试上限
+	gateRateLimit    = 10 // 每 IP 每分钟口令尝试上限
 	gateRateWindow   = time.Minute
 )
 

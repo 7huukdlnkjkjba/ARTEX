@@ -62,19 +62,19 @@ type Host struct {
 
 // Port 是一条"主机:端口"暴露面。
 type Port struct {
-	ID       int64  `json:"id"`
-	IP       string `json:"ip"`
-	Port     int    `json:"port"`
-	Proto    string `json:"proto"` // tcp/udp
-	State    string `json:"state"` // open/closed/filtered
-	Service  string `json:"service"`
-	Product  string `json:"product,omitempty"`
-	Version  string `json:"version,omitempty"`
-	Banner   string `json:"banner,omitempty"`
-	TLS      bool   `json:"tls"`
-	CertCN   string `json:"cert_cn,omitempty"`
+	ID       int64    `json:"id"`
+	IP       string   `json:"ip"`
+	Port     int      `json:"port"`
+	Proto    string   `json:"proto"` // tcp/udp
+	State    string   `json:"state"` // open/closed/filtered
+	Service  string   `json:"service"`
+	Product  string   `json:"product,omitempty"`
+	Version  string   `json:"version,omitempty"`
+	Banner   string   `json:"banner,omitempty"`
+	TLS      bool     `json:"tls"`
+	CertCN   string   `json:"cert_cn,omitempty"`
 	CertSANs []string `json:"cert_sans,omitempty"`
-	LastSeen string `json:"last_seen"`
+	LastSeen string   `json:"last_seen"`
 }
 
 // Fingerprint 是一个 Web 服务的指纹（URL 维度）。
@@ -142,10 +142,10 @@ type Evidence struct {
 type Finding struct {
 	ID          int64      `json:"id"`
 	CampaignID  string     `json:"campaign_id"`
-	Stage       string     `json:"stage"`      // 出自哪个攻击阶段
-	Module      string     `json:"module"`     // 出自哪个攻击模块
-	VulnClass   string     `json:"vulnclass"`  // 漏洞类：sql_injection/weak_credential/...
-	Name        string     `json:"name"`       // 人类可读名
+	Stage       string     `json:"stage"`     // 出自哪个攻击阶段
+	Module      string     `json:"module"`    // 出自哪个攻击模块
+	VulnClass   string     `json:"vulnclass"` // 漏洞类：sql_injection/weak_credential/...
+	Name        string     `json:"name"`      // 人类可读名
 	Severity    Severity   `json:"severity"`
 	Confidence  Confidence `json:"confidence"`
 	Target      string     `json:"target"` // host:port 或 URL
@@ -176,14 +176,14 @@ type Inference struct {
 
 // CampaignResult 是一次攻击战役的最终产物。
 type CampaignResult struct {
-	CampaignID  string     `json:"campaign_id"`
-	Goal        string     `json:"goal"`
-	StartedAt   string     `json:"started_at"`
-	FinishedAt  string     `json:"finished_at"`
-	DurationSec int64      `json:"duration_sec"`
-	StageStats  []StageRun `json:"stage_stats"`
-	Hosts       []*Host    `json:"hosts"`
-	Ports       []*Port    `json:"ports"`
+	CampaignID  string         `json:"campaign_id"`
+	Goal        string         `json:"goal"`
+	StartedAt   string         `json:"started_at"`
+	FinishedAt  string         `json:"finished_at"`
+	DurationSec int64          `json:"duration_sec"`
+	StageStats  []StageRun     `json:"stage_stats"`
+	Hosts       []*Host        `json:"hosts"`
+	Ports       []*Port        `json:"ports"`
 	Web         []*Fingerprint `json:"web"`
 	Creds       []*Credential  `json:"credentials,omitempty"`
 	Findings    []*Finding     `json:"findings"`
