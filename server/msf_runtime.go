@@ -388,6 +388,9 @@ func (s *Server) msfAutoKick(ctx context.Context, findingID int64) {
 	}
 	class := msf.NormalizeClass(f.VulnClass + " " + f.Name)
 	if class == "" {
+		// No deterministic Metasploit path → hand the finding to the generic
+		// Exploit Author, which writes and verifies a real script instead.
+		s.kickExploitAuthor(ctx, f)
 		return
 	}
 	task, ok := s.m.Task(strconv.FormatInt(*f.TaskID, 10))
@@ -478,6 +481,101 @@ func (s *Server) msfAutoKick(ctx context.Context, findingID int64) {
 	}
 	task.Notify()
 	log.Printf("[msf] 已为确认漏洞 #%d（%s）派发利用意图 #%d：%s", f.ID, class, intentID, target)
+}
+
+// kickExploitAuthor dispatches a generic exploit_author intent for a confirmed
+// finding that has no deterministic Metasploit path. Dedup uses the same
+// active-intent query as the MSF path, so re-confirmation cannot fan out.
+func (s *Server) kickExploitAuthor(ctx context.Context, f *db.DBFinding) {
+	if s.m == nil || s.m.pg == nil || f == nil || f.TaskID == nil {
+		return
+	}
+	task, ok := s.m.Task(strconv.FormatInt(*f.TaskID, 10))
+	if !ok || task == nil || task.Store == nil {
+		return
+	}
+	host, port := "", 0
+	if len(f.AssetIDs) > 0 {
+		if assets, err := s.m.Assets().GetByIDs(f.AssetIDs); err == nil {
+			for _, a := range assets {
+				if a == nil {
+					continue
+				}
+				if a.IP != "" {
+					host = a.IP
+				} else if a.Domain != "" {
+					host = a.Domain
+				}
+				if a.Port != nil {
+					port = *a.Port
+				} else if len(a.OpenPorts) > 0 {
+					if v, ok := a.OpenPorts[0]["port"].(float64); ok {
+						port = int(v)
+					}
+				}
+				if host != "" {
+					break
+				}
+			}
+		}
+	}
+	if host == "" {
+		host, port = msfTargetFromFinding(f.Summary + "\n" + f.Evidence)
+	}
+	if host == "" {
+		log.Printf("[exploit] 漏洞 #%d 无法确定目标主机，跳过 exploit_author 派单", f.ID)
+		return
+	}
+	target := host
+	if port > 0 {
+		target = fmt.Sprintf("%s:%d", host, port)
+	}
+	if active, err := task.Store.HasActiveIntentForFinding(f.ID); err == nil && active {
+		log.Printf("[exploit] 漏洞 #%d 已有未完成的利用意图，跳过重复派发", f.ID)
+		return
+	}
+	vulnClass := strings.TrimSpace(f.VulnClass)
+	if vulnClass == "" {
+		vulnClass = f.Name
+	}
+	cve := ""
+	if m := findingCVERe.FindString(f.VulnClass + " " + f.Name + " " + f.Summary); m != "" {
+		cve = strings.ToUpper(m)
+	}
+	summary := fmt.Sprintf("为已确认漏洞 #%d「%s」写出可运行的 exp（目标 %s，类别 %s）："+
+		"先用 web_search 找公开 PoC、必要时读目标源码，再 exploit_init/write/run 迭代，拿到真实回显后 exploit_verify；"+
+		"打不通就 exploit_abandon 写清卡点。", f.ID, f.Name, target, vulnClass)
+	intentID, err := task.Store.AddIntent(map[string]any{
+		"summary":    summary,
+		"action":     "exploit_author",
+		"finding_id": f.ID,
+		"target":     target,
+		"vulnclass":  vulnClass,
+		"cve":        cve,
+		"language":   "python",
+	}, 8, f.AssetIDs, "exploit")
+	if err != nil {
+		log.Printf("[exploit] 为漏洞 #%d 派单失败: %v", f.ID, err)
+		return
+	}
+	if f.NodeID != nil {
+		_ = task.Store.Link(*f.NodeID, db.RelDerivedFrom, intentID)
+	}
+	if _, err := task.Store.AddNode(db.KindHint, map[string]any{
+		"summary": "Exploit Author 已派发：" + target,
+		"text": fmt.Sprintf("已为漏洞 #%d 自动派发 exp 编写意图 #%d（目标 %s，类别 %s）。"+
+			"该意图已在 frontier，不要为同一漏洞重复派单；若它 abandon，会写回 fact 说明卡点。",
+			f.ID, intentID, target, vulnClass),
+		"auto": "exploit",
+	}, 0, "confirmed", "system", nil); err != nil {
+		log.Printf("[exploit] 写入派发提示失败: %v", err)
+	}
+	if isTerminalStatus(s.m.TaskStatus(task.ID)) {
+		log.Printf("[exploit] 任务 %s 已终态，复活以执行 exp 意图 #%d", task.ID, intentID)
+		s.reviveTask(task)
+	}
+	task.Notify()
+	log.Printf("[exploit] 已为漏洞 #%d（%s）派发 exploit_author 意图 #%d：%s", f.ID, vulnClass, intentID, target)
 }
 
 // msfIntentPayload builds the frontier intent for one confirmed finding. The

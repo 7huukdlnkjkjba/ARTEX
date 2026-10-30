@@ -79,10 +79,11 @@ ON CONFLICT DO NOTHING`, s.expID, id, RelYields, factID); err != nil {
 	return factID, tx.Commit()
 }
 
-// HasActiveIntentForFinding reports whether an MSF exploit intent for this finding
-// is still in play (open or running). The auto-kick writes one intent per confirmed
-// finding; a repeated confirmation, a manual re-triage, or an overlapping kick must
-// not fan out duplicates into the frontier.
+// HasActiveIntentForFinding reports whether an exploit intent for this finding is
+// still in play (open or running). Both auto-kick paths write one intent per
+// confirmed finding — Metasploit uses `msf_finding_id`, the generic exploit author
+// uses `finding_id` — so a repeated confirmation, a manual re-triage, or an
+// overlapping kick must not fan out duplicates into the frontier.
 func (s *ExplorationStore) HasActiveIntentForFinding(findingID int64) (bool, error) {
 	if findingID <= 0 {
 		return false, nil
@@ -90,6 +91,7 @@ func (s *ExplorationStore) HasActiveIntentForFinding(findingID int64) (bool, err
 	var exists bool
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
 WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running')
-AND payload->>'msf_finding_id' = $2)`, s.expID, strconv.FormatInt(findingID, 10)).Scan(&exists)
+AND (payload->>'msf_finding_id' = $2 OR payload->>'finding_id' = $2))`,
+		s.expID, strconv.FormatInt(findingID, 10)).Scan(&exists)
 	return exists, err
 }

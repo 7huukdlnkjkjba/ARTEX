@@ -30,6 +30,7 @@ import (
 	stagepkg "github.com/Autumn-27/artex/stage"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/artex/tunnel"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
@@ -185,6 +186,19 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		b := s.agentsForTask(t)
 		return b.pl, b.wk
 	})
+	// Specialist intents (exploit_author / vulnhunt) carry their own prompt and
+	// toolset. The engine keeps context/pause/kill/state handling; the server
+	// supplies the role-specific execution body.
+	s.engine.SetSpecialIntentRunner(func(ctx context.Context, t *Task, intent *db.Node, action string) (harness.TerminalReason, agent.WriteCounts, error) {
+		switch action {
+		case "exploit_author":
+			return s.executeExploitAuthor(ctx, t, intent)
+		case "vulnhunt":
+			return s.executeVulnHunter(ctx, t, intent)
+		default:
+			return "", agent.WriteCounts{}, fmt.Errorf("unknown specialist action: %s", action)
+		}
+	})
 	// Global readiness (Ready()/llm_configured): a global active LLM provider is
 	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
 	s.engine.SetReadiness(func() bool {
@@ -241,6 +255,14 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
 		seedPrompts(m.pg)          // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		// 专用利用/漏洞挖掘子系统的表。工具不入 tools 表：它们只注入到
+		// exploit_author / vulnhunt 意图的专用 worker，不参与通用的 per-agent 绑定。
+		if err := db.NewExploitStore(m.pg).EnsureSchema(context.Background()); err != nil {
+			log.Printf("[exploit] 初始化 exploits 表失败: %v", err)
+		}
+		if err := db.NewVulnHuntStore(m.pg).EnsureSchema(context.Background()); err != nil {
+			log.Printf("[vulnhunt] 初始化 vulnhunt 表失败: %v", err)
+		}
 		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
 		s.seedStageShareTool()     // F13 受管文件投递工具 seed 进 tools 表(默认绑 worker)
 		s.initSessions()           // 期 1a 立足点会话子系统:Registry + 启动恢复(DB 存活会话)

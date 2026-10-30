@@ -28,6 +28,37 @@
   写完意图后会走 `reviveTask` 复活任务（与 set_goals 同一条 admission 路径），
   不再需要人工点「继续」。
 
+## [0.3.19] - 2026-10-31
+
+### Exploit Author 与 Vuln Hunter
+
+#### 新增的功能
+
+- **专用意图分流**：引擎识别 payload 的 `action=exploit_author` / `action=vulnhunt`，走独立
+  system prompt + 独立工具集（`Engine.SetSpecialIntentRunner` / `runSpecialIntent`），暂停、终止、
+  超时收尾、模型额度耗尽与状态落库仍复用普通 work 的语义。
+- **Exploit Author**：确认漏洞经 `msfAutoKick` 判定无确定性 MSF 路径时，`kickExploitAuthor`
+  自动派发 `exploit_author` 意图（同漏洞已有 open/running 意图则跳过，终态任务自动复活）。
+  工具 `exploit_init` / `exploit_write` / `exploit_run` / `exploit_verify` / `exploit_abandon`；
+  `exploit_run` 支持 python/php/bash/go 并返回 stdout/stderr/exit_code/timed_out；verify 要求
+  至少执行过一次，成功后把源码+证据追加到 finding 报告，并归档到
+  `<dataDir>/exploit-library/<vulnclass>/`，同时写回 confirmed fact。
+- **Vuln Hunter**：`vulnhunt_init` 建 run 与
+  `<dataDir>/tasks/<taskID>/vulnhunt/<runID>/{src,build,crashes,corpus,logs}`，支持
+  `repo:URL@commit` / `binary:/path` / `api:URL`；工具 `vulnhunt_write_harness` /
+  `vulnhunt_build` / `vulnhunt_fuzz` / `vulnhunt_triage` / `vulnhunt_report`。
+  triage 以 sanitizer kind + 栈顶 3 帧算 signature，`(run_id,signature)` 唯一索引去重；
+  唯一 crash 提升为 finding（vulnclass=`fuzzing`，worker=`vulnhunter`）。
+- **数据表**：`exploits`、`vulnhunt_runs`、`vulnhunt_crashes`，服务启动时幂等建表。
+- **提示词**：`agent/prompts/exploit_author_prompt.md`、`agent/prompts/vulnhunter_prompt.md`
+  嵌入二进制，经 `agent.RenderPrompt` 走 DB 覆盖 → 代码默认；产物路径与红线为代码固定尾。
+- **本地参考**：Exploit Author 的提示词自动带原 finding 证据与本平台已验证同类 exp，
+  不再依赖不存在的代码/答案向量库。
+
+#### 修复
+
+- 修复 `agent/worker.go` 中 `compactionWindow` 的 `reeturn` 拼写错误（工作区既有问题）。
+
 ## [0.3.18] - 2026-10-25
 
 ### Metasploit 全自动闭环

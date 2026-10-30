@@ -17,9 +17,11 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.16** | **deepseek-hermes省钱代码（成本控制）**：单次会话默认 ¥6 封顶，缓存命中按 ¥0.5/M 单独计价、不与输入重复计费，预算余额写进 planner/worker 提示词逼模型收敛，任务详情显示 `≈¥已用 / 上限` |
 | **v0.3.17** | 并入artex-ymh能力「外网突破 → 立足点 → 内网纵深」：webshell 会话、penelope 反弹、`session_recon`、suo5/chisel 隧道、内网拓扑、凭据库、待授权网段、任务移交、伪装门控、一键放行、RoE 三态、蜜罐识别、chains 技能、`artex doctor` |
 | **v0.3.18** | Metasploit **全自动闭环**（**端到端已验证 2026-10-27**）：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、确认后自动派单、会话自动取证并写回 fact；闭环依赖**自动安装**（首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`，可关、可指定解释器） |
+| **v0.3.19** | **Exploit Author + Vuln Hunter**：Metasploit 无确定性路径的确认漏洞自动转交 `exploit_author` 意图，用 `exploit_init/write/run/verify/abandon` 写出并验证真实 exp；新增 `vulnhunt` 意图与 `vulnhunt_init/build/fuzz/triage/report` 工具，对本地仓库/二进制做 fuzzing、按 sanitizer 栈去重并提升为 finding |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
+- Exploit Author / Vuln Hunter：见下文「Exploit Author 与 Vuln Hunter（0.3.19）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -150,6 +152,87 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 `ARTEX_MSF_PYTHON=/path/to/python` 可指定解释器/venv）。Metasploit 已安装时也无需手工启动 msfrpcd。
 模块映射、分支语义与环境变量见 [MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)，Windows 可用
 [scripts/setup-msf-mcp.ps1](scripts/setup-msf-mcp.ps1) 做预检。
+
+---
+
+## Exploit Author 与 Vuln Hunter（0.3.19）
+
+Metasploit 闭环解决的是「有确定性模块」的漏洞；对没有模块映射的类别，以及需要从源码/二进制里
+自己挖的漏洞，0.3.19 增加了两个**专用意图**。它们不是新的 agent 行，而是由意图 payload 的
+`action` 分流到独立 system prompt + 独立工具集，引擎侧的暂停/终止/超时/状态落库仍与普通 work 一致。
+
+### Exploit Author（`action=exploit_author`）
+
+**何时触发**：finding 被确认后，`msfAutoKick` 先算 `msf.NormalizeClass`；没有确定性 MSF 路径时
+不再静默返回，而是 `kickExploitAuthor` 直接向 frontier 写一条 `action=exploit_author` 的高优先级
+意图（origin=`exploit`），并锚定漏洞节点/资产。已有 open/running 利用意图时跳过；任务已终态则
+自动 `reviveTask` 复活。
+
+**它拿到什么**：目标（优先取 finding 锚定资产的 IP/域名+端口，缺失时从摘要/证据文本回收）、
+vulnclass/CVE、偏好语言，以及本地参考：原 finding 的摘要与证据、本平台**已验证过的同类 exp**
+（`exploits` 表按 vulnclass/CVE 查，路径+证据摘要直接进提示词）。公开资料由 worker 自带的
+`web_search` 与 `WebFetch` 补齐。
+
+**工具链**：
+
+| 工具 | 作用 |
+|---|---|
+| `exploit_init` | 在 `<dataDir>/tasks/<taskID>/exploits/` 建 `<name>.<ext>`，登记 `exploits` 行（draft）；自动从意图 payload 读取 `finding_id` |
+| `exploit_write` | 整体覆盖 exp 源码 |
+| `exploit_run` | 真实执行（python/php/bash/go），返回 stdout/stderr/exit_code/elapsed_ms/timed_out；默认 60s、上限 120s |
+| `exploit_verify` | 标记 verified（要求至少 run 过一次），把**源码 + 证据原文**追加到 finding 报告 |
+| `exploit_abandon` | 标记 abandoned，reason 写回 fact 供 planner 判断 |
+
+**落库与回流**：
+
+- `exploits` 表记录 task/finding/intent、target、vulnclass、cve、language、path、status、attempts、
+  last_error、evidence；索引覆盖 task/status、finding、intent。
+- `exploit_verify` 成功后：源码+证据追加到 finding 的 Markdown 报告（带 `ARTEX_EXPLOIT:<id>` 标记，
+  重复 verify 不重复追加），源码另归档到 `<dataDir>/exploit-library/<vulnclass>/`；同时写一条
+  `confidence=confirmed` 的 fact 并 `yields` 挂到意图。abandoned 写 `inferred` fact。
+- 证据不可伪造：`exploit_verify` 的 evidence 必填，且提示词/code-owned 红线要求贴真实回显；
+  工具只认「跑过 + 有输出」，不接受纯推断。
+
+### Vuln Hunter（`action=vulnhunt`）
+
+**何时触发**：planner 或人工下发 `action=vulnhunt` 意图，payload 带 `target_spec`、`fuzzer`。
+典型用法是「目标是一个开源组件/本地二进制，需要 fuzz 找 0day」。
+
+**工作区**：`vulnhunt_init` 先建 `vulnhunt_runs` 行，再绑定
+`<dataDir>/tasks/<taskID>/vulnhunt/<runID>/{src,build,crashes,corpus,logs}`；`repo:` 走浅克隆
+（可带 `@commit`），`binary:` 拷贝本地文件，`api:` 写 `src/TARGET_URL` 供 http harness 读取。
+
+**工具链**：
+
+| 工具 | 作用 |
+|---|---|
+| `vulnhunt_init` | 建 run + 工作区 + 克隆/拷贝目标；duration 默认 300s、上限 1800s |
+| `vulnhunt_write_harness` | 写 `build/harness.c`（libFuzzer `LLVMFuzzerTestOneInput` / AFL++ `__AFL_FUZZ_TESTCASE_BUF`） |
+| `vulnhunt_build` | 默认 clang ASan+fuzzer / `afl-clang-fast`，可传自定义 `build_cmd`；5 分钟超时 |
+| `vulnhunt_fuzz` | libFuzzer `-max_total_time` 或 AFL++ `afl-fuzz -V`，返回 `crashes/` 文件列表 |
+| `vulnhunt_triage` | 复跑 crash、解析 sanitizer、算 signature、最小化、去重 |
+| `vulnhunt_report` | 把**唯一** crash 提升为 finding（vulnclass=`fuzzing`、worker=`vulnhunter`），并把 finding_id 回填到 crash 行 |
+
+**去重与证据**：signature = `sha256("<Sanitizer>:<kind>|<栈顶 3 帧>")[:16]`；`vulnhunt_crashes`
+上的 `(run_id, signature)` 唯一索引是去重事实源，同一 signature 的后续 triage 只返回首次的
+crash_id（`duplicate_of` 指向它），不会重复插行。重复 crash 不会被 `vulnhunt_report` 提升。
+
+**落库**：`vulnhunt_runs`（target_spec/fuzzer/workspace/status/duration/crash_count/unique_count/
+last_error）与 `vulnhunt_crashes`（signature/kind/stack/poc_path/minimized_path/duplicate_of/
+finding_id）。run 状态流转 `clone → building → fuzzing → triaging → done|failed`。
+
+### 边界与实现位置
+
+- **边界**：Exploit Author 只打意图给定的 target，走 guard hooks 与 task_scope；Vuln Hunter 只对
+  工作区里的克隆/编译产物 fuzz，不向外部主机发包。两者都不把「疑似」写成 finding。
+- **专用提示词**以 Markdown 存放并嵌入二进制：[agent/prompts/exploit_author_prompt.md](agent/prompts/exploit_author_prompt.md)、
+  [agent/prompts/vulnhunter_prompt.md](agent/prompts/vulnhunter_prompt.md)，经 `agent.RenderPrompt`
+  走「DB 覆盖 → 代码默认」渲染；产物路径规约与红线是代码固定尾，不可被 DB 正文编辑掉。
+- **代码位置**：`db/exploit.go`、`db/vulnhunt.go`；`server/exploit_tools.go`、`server/exploit_author.go`、
+  `server/vulnhunter_tools.go`、`server/vulnhunter.go`；分流在 `server/engine.go` 的
+  `runSpecialIntent`，派单在 `server/msf_runtime.go` 的 `kickExploitAuthor`。
+- **工具发现**：这两组工具不 seed 进 `tools` 表、不参与 per-agent 绑定，只注入到对应 action 的
+  专用 worker；避免通用 worker 误用 `exploit_run`/`vulnhunt_*` 这类高风险工具。
 
 ---
 

@@ -83,3 +83,13 @@ func renderTmpl(tmpl string, vars any) (string, error) {
 	}
 	return b.String(), nil
 }
+
+// RenderPrompt is the exported form of renderSystem for host-side specialist
+// agents (Exploit Author / Vuln Hunter) that live in the server package but
+// still want the DB prompt-override → code-default rendering chain.
+func RenderPrompt(agentKey, def string, vars any) string {
+	return renderSystem(agentKey, def, vars)
+}
+
+// NowString is the exported form of nowStr: the universal {{.Now}} value.
+func NowString() string { return nowStr() }

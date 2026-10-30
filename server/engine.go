@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -156,6 +157,11 @@ type Engine struct {
 	// (for example an exhausted failover chain) — there is no global-pair fallback.
 	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
 	resolveAuthoritative bool
+	// specialIntent, when set, executes intents whose payload carries
+	// action=exploit_author / vulnhunt. Those agents have their own prompt and
+	// toolset and therefore bypass the pool worker; all context/pause/kill/state
+	// handling stays in runSpecialIntent so the engine invariants are shared.
+	specialIntent func(ctx context.Context, t *Task, intent *db.Node, action string) (harness.TerminalReason, agent.WriteCounts, error)
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
 	readiness func() bool
@@ -768,6 +774,14 @@ func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner,
 	e.resolveAuthoritative = true
 }
 
+// SetSpecialIntentRunner installs the executor for specialist intents
+// (action=exploit_author / vulnhunt). The runner owns prompt/tool construction
+// and the final DB write-back; the engine keeps context, pause/kill and intent
+// state handling shared with normal work.
+func (e *Engine) SetSpecialIntentRunner(fn func(ctx context.Context, t *Task, intent *db.Node, action string) (harness.TerminalReason, agent.WriteCounts, error)) {
+	e.specialIntent = fn
+}
+
 // snapshotFor returns the planner/worker a task should run on, from the task-router
 // resolver. nil,nil means the task is deliberately unavailable (e.g. an exhausted
 // failover chain); there is no global-pair fallback.
@@ -1097,6 +1111,14 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 // must already hold one task-operation admission for the whole sequence so a delete
 // cannot observe quiescence between the LLM return and the final DB writes.
 func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
+	// Specialist intents bypass the pool worker: they carry their own system
+	// prompt and toolset. A human message on such an intent falls through to the
+	// normal worker path (the specialist has no chat continuation contract).
+	if message == "" && e.specialIntent != nil {
+		if action := specialIntentAction(intent); action != "" {
+			return e.runSpecialIntent(ctx, t, intent, action)
+		}
+	}
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
@@ -1298,6 +1320,126 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
 	e.touch(t.ID)
 	t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
+	return true
+}
+
+// specialIntentAction returns the specialist action encoded in an intent payload,
+// or "" for ordinary intents.
+func specialIntentAction(intent *db.Node) string {
+	if intent == nil || len(intent.Payload) == 0 {
+		return ""
+	}
+	var p struct {
+		Action string `json:"action"`
+	}
+	if json.Unmarshal(intent.Payload, &p) != nil {
+		return ""
+	}
+	switch p.Action {
+	case "exploit_author", "vulnhunt":
+		return p.Action
+	}
+	return ""
+}
+
+// runSpecialIntent executes and settles a specialist intent. It mirrors the
+// context/registration/terminal-state part of runIntent; the actual prompt and
+// toolset live behind e.specialIntent (server.executeExploitAuthor /
+// executeVulnHunter). Keeping the settling logic here means pause, kill, task
+// timeout, model error and planner wake-up behave exactly like normal work.
+func (e *Engine) runSpecialIntent(ctx context.Context, t *Task, intent *db.Node, action string) bool {
+	e.stampFirstRun(t)
+	e.touch(t.ID)
+	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false)
+	if ectx.Err() != nil || e.IsDeleting(t.ID) {
+		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
+			log.Printf("[%s] task %s 意图 #%d 领取后回退失败: %v", action, t.ID, intent.ID, err)
+		}
+		return true
+	}
+	workCtx, workCancel := context.WithCancelCause(ectx)
+	e.registerWork(intent.ID, workCancel)
+	iid := intent.ID
+	label := fmt.Sprintf("%s · #%d", action, iid)
+	taskEmit := func(a db.Activity) {
+		nid := iid
+		a.NodeID, a.Worker = &nid, action
+		e.emitActivity(t, a)
+	}
+	workCtx = intercept.WithTaskContext(workCtx, t.ID, label, taskEmit)
+
+	e.BeginLLMCall(t.ID)
+	reason, wrote, err := e.specialIntent(workCtx, t, intent, action)
+	e.EndLLMCall(t.ID)
+
+	workCause := context.Cause(workCtx)
+	killed := workCtx.Err() != nil && ectx.Err() == nil
+	ctlAction, completeWork := e.detachWork(intent.ID)
+	if ctlAction == "" {
+		switch {
+		case errors.Is(workCause, agent.AbortWorkPausedByUser):
+			ctlAction = "pause"
+		case errors.Is(workCause, agent.AbortWorkCancelledByUser):
+			ctlAction = "cancel"
+		}
+	}
+	var controlErr error
+	defer func() { completeWork(controlErr) }()
+
+	if ctlAction == "pause" || ctlAction == "cancel" {
+		controlErr = transitionIntentState(t.Store, intent.ID, "running", "paused")
+		if controlErr != nil {
+			log.Printf("[%s] task %s 意图 #%d %s 状态落库失败: %v", action, t.ID, intent.ID, ctlAction, controlErr)
+		}
+		e.touch(t.ID)
+		return true
+	}
+	if ectx.Err() != nil && taskExecutionPaused(context.Cause(ectx)) {
+		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
+			log.Printf("[%s] task %s 意图 #%d 任务暂停回退失败: %v", action, t.ID, intent.ID, err)
+		}
+		return true
+	}
+	if ectx.Err() != nil && e.isSettling(t.ID) {
+		if err := transitionIntentState(t.Store, intent.ID, "running", "exhausted"); err != nil {
+			log.Printf("[%s] task %s 意图 #%d 超时收尾状态落库失败: %v", action, t.ID, intent.ID, err)
+		}
+		e.touch(t.ID)
+		return true
+	}
+	if ectx.Err() != nil && isTerminalStatus(e.m.TaskStatus(t.ID)) {
+		if err := transitionIntentState(t.Store, intent.ID, "running", "stopped"); err != nil {
+			log.Printf("[%s] task %s 意图 #%d 终态停止落库失败: %v", action, t.ID, intent.ID, err)
+		}
+		e.touch(t.ID)
+		return true
+	}
+	if killed {
+		if err := transitionIntentState(t.Store, intent.ID, "running", "stopped"); err != nil {
+			log.Printf("[%s] task %s 意图 #%d planner 停止落库失败: %v", action, t.ID, intent.ID, err)
+		}
+		e.touch(t.ID)
+		t.Notify()
+		return true
+	}
+	if err != nil {
+		log.Printf("[%s] intent %d: %v", action, intent.ID, err)
+	}
+	state := "done"
+	switch {
+	case err != nil:
+		state = "blocked"
+	case reason == harness.ReasonMaxTurns || reason == harness.ReasonTimeout:
+		state = "exhausted"
+	}
+	if state == "blocked" && isTaskLLMChainExhausted(err) {
+		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
+	} else if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
+		log.Printf("[%s] task %s 意图 #%d 终态 %s 落库失败: %v", action, t.ID, intent.ID, state, stateErr)
+	}
+	log.Printf("[%s] task %s 意图 #%d 结束: %s (写回 %s)", action, t.ID, intent.ID, state, wrote)
+	e.touch(t.ID)
+	t.NotifyDone(intent.ID)
 	return true
 }
 
