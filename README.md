@@ -190,8 +190,11 @@ vulnclass/CVE、偏好语言，以及本地参考：原 finding 的摘要与证�
 - `exploit_verify` 成功后：源码+证据追加到 finding 的 Markdown 报告（带 `ARTEX_EXPLOIT:<id>` 标记，
   重复 verify 不重复追加），源码另归档到 `<dataDir>/exploit-library/<vulnclass>/`；同时写一条
   `confidence=confirmed` 的 fact 并 `yields` 挂到意图。abandoned 写 `inferred` fact。
-- 证据不可伪造：`exploit_verify` 的 evidence 必填，且提示词/code-owned 红线要求贴真实回显；
-  工具只认「跑过 + 有输出」，不接受纯推断。
+- 证据不可伪造：`exploit_verify` 的 evidence 必填；工具侧要求至少跑过一次（`attempts>0`），
+  输出是否足以作为证据由提示词红线约束模型自检。
+- 范围强制：`exploit_init` / `exploit_run` 在动目标前用任务的 `task_scope` 校验 target 主机
+  （脚本里的目标对 Bash 主机抽取不可见，所以在工具侧显式补一道闸）；未登记 scope 时沿用
+  平台既有的 fail-open 语义。
 
 ### Vuln Hunter（`action=vulnhunt`）
 
@@ -223,8 +226,9 @@ finding_id）。run 状态流转 `clone → building → fuzzing → triaging �
 
 ### 边界与实现位置
 
-- **边界**：Exploit Author 只打意图给定的 target，走 guard hooks 与 task_scope；Vuln Hunter 只对
-  工作区里的克隆/编译产物 fuzz，不向外部主机发包。两者都不把「疑似」写成 finding。
+- **边界**：Exploit Author 只打意图给定的 target，`exploit_init`/`exploit_run` 会先按任务的
+  `task_scope` 校验目标主机，worker 仍挂 guard hooks；Vuln Hunter 只对工作区里的克隆/编译产物
+  fuzz，不向外部主机发包。两者都不把「疑似」写成 finding。
 - **专用提示词**以 Markdown 存放并嵌入二进制：[agent/prompts/exploit_author_prompt.md](agent/prompts/exploit_author_prompt.md)、
   [agent/prompts/vulnhunter_prompt.md](agent/prompts/vulnhunter_prompt.md)，经 `agent.RenderPrompt`
   走「DB 覆盖 → 代码默认」渲染；产物路径规约与红线是代码固定尾，不可被 DB 正文编辑掉。
