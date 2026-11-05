@@ -60,6 +60,106 @@ func msfTargetFromFinding(text string) (string, int) {
 	return "", 0
 }
 
+// exploitEvidence 表示某条 finding 是否具备“可继续自动利用”的证据。
+type exploitEvidence struct {
+	Verified   bool // 有 exploit_verify 成功记录
+	HasEcho    bool // 有真实回显/证据文本
+	HasPoC     bool // 有公开 PoC 或已写出的 exp
+	LastStatus string
+}
+
+// hasExploitEvidence 是 msfAutoKick 的证据闸门。
+// 只有返回 true 才允许继续走 msf 自动打或转通用 Exploit Author。
+func (s *Server) hasExploitEvidence(ctx context.Context, f *db.DBFinding) (bool, exploitEvidence) {
+	ev := exploitEvidence{}
+	if s.m == nil || s.m.pg == nil || f == nil || f.TaskID == nil {
+		return false, ev
+	}
+	task, ok := s.m.Task(strconv.FormatInt(*f.TaskID, 10))
+	if !ok || task == nil || task.Store == nil {
+		return false, ev
+	}
+
+	// 1) 查与该 finding 关联的意图，找 exploit_verify 成功记录。
+	intents, err := task.Store.IntentsByFinding(f.ID)
+	if err != nil {
+		log.Printf("[gate] 漏洞 #%d 查意图失败: %v", f.ID, err)
+		return false, ev
+	}
+	for _, it := range intents {
+		action, _ := it["action"].(string)
+		status, _ := it["status"].(string)
+		ev.LastStatus = status
+		if action == "exploit_verify" && isSuccessStatus(status) {
+			ev.Verified = true
+		}
+		if action == "exploit_author" && isSuccessStatus(status) {
+			ev.HasPoC = true
+		}
+	}
+
+	// 2) 查证据文本：Summary/Evidence 里是否有真实回显特征。
+	text := strings.ToLower(f.Summary + "\n" + f.Evidence)
+	if looksLikeRealEcho(text) {
+		ev.HasEcho = true
+	}
+
+	// 3) 查节点：是否有“已验证/拿到回显”的 fact/hint。
+	nodes, err := task.Store.NodesByFinding(f.ID)
+	if err == nil {
+		for _, n := range nodes {
+			t, _ := n["text"].(string)
+			lt := strings.ToLower(t)
+			if strings.Contains(lt, "已验证") || strings.Contains(lt, "拿到回显") ||
+				strings.Contains(lt, "verified") || strings.Contains(lt, "real echo") {
+				ev.Verified = true
+			}
+		}
+	}
+
+	// 闸门规则：Verified 或 (HasEcho && HasPoC) 才放行。
+	pass := ev.Verified || (ev.HasEcho && ev.HasPoC)
+	if !pass {
+		log.Printf("[gate] 漏洞 #%d 无利用证据，拦截派单（verified=%v echo=%v poc=%v last=%s）",
+			f.ID, ev.Verified, ev.HasEcho, ev.HasPoC, ev.LastStatus)
+	}
+	return pass, ev
+}
+
+// msfEvidenceGateEnabled reports whether the exploit-evidence gate is active.
+// It defaults to on; ARTEX_MSF_EVIDENCE_GATE=0/off/false restores the legacy
+// "dispatch every confirmed finding straight to Metasploit" behaviour.
+func msfEvidenceGateEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ARTEX_MSF_EVIDENCE_GATE"))) {
+	case "0", "off", "false", "no":
+		return false
+	}
+	return true
+}
+
+func isSuccessStatus(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "success", "succeeded", "done", "verified", "passed", "ok":
+		return true
+	}
+	return false
+}
+
+// looksLikeRealEcho 用启发式判断证据里是否有“真实回显”，而不是仅漏洞描述。
+func looksLikeRealEcho(text string) bool {
+	markers := []string{
+		"uid=", "gid=", "root:", "www-data", "command output",
+		"<script>alert", "alert(1)", "sql syntax", "you have an error in your sql",
+		"token=", "set-cookie", "http/1.1 200", "{\"", "\"error\":",
+	}
+	for _, m := range markers {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // msfProc owns an ARTEX-managed msfrpcd instance so the Metasploit closed loop
 // needs no manual start: on boot (unless disabled) ARTEX ensures an RPC endpoint
 // is reachable, generating and persisting the password if needed.
@@ -392,6 +492,15 @@ func (s *Server) msfAutoKick(ctx context.Context, findingID int64) {
 		// Exploit Author, which writes and verifies a real script instead.
 		s.kickExploitAuthor(ctx, f)
 		return
+	}
+	// 证据闸门：没有任何可复现证据（已验证，或真实回显 + 已写出的 exp）的确认漏洞
+	// 不自动推进到利用阶段，避免把误报当战果打；闸门可被 ARTEX_MSF_EVIDENCE_GATE
+	// 关掉，用于需要按旧行为全自动派单的场景。
+	if msfEvidenceGateEnabled() {
+		if ok, ev := s.hasExploitEvidence(ctx, f); !ok {
+			log.Printf("[msf] 漏洞 #%d 证据闸门未通过，跳过自动打（last=%s）", f.ID, ev.LastStatus)
+			return
+		}
 	}
 	task, ok := s.m.Task(strconv.FormatInt(*f.TaskID, 10))
 	if !ok || task == nil || task.Store == nil {
