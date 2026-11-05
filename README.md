@@ -370,7 +370,7 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 ### 本仓库的私有 Release 更新源
 
-页面一键更新固定从 [Hinln/ARTEX Releases](https://github.com/Hinln/ARTEX/releases) 检查和下载版本。克隆或通过 Git 更新源码也使用 `Hinln/ARTEX`；原项目的 Go module 路径保持不变。
+本仓库（[7huukdlnkjkjba/ARTEX](https://github.com/7huukdlnkjkjba/ARTEX)）
 
 这是私有仓库。请为运行 ARTEX 的后端进程设置 `ARTEX_UPDATE_GITHUB_TOKEN`，令牌只需本仓库的 **Contents: read** 权限。令牌由后端用于查询 Release 和下载附件，不发送给浏览器，也不要提交到 Git。
 
@@ -714,6 +714,57 @@ flowchart TB
 ```
 
 于是攻击链在“事件驱动 + 无状态会话”的环境下依然**稳定推进、不重复、不错序**——这是 ARTEX 能自主走完多步利用链的关键。
+
+---
+
+## 实战测试记录
+
+### 记录 1：B 站（bilibili.com，授权范围测试，2026-11-05）
+
+**任务目标**：获得 B 站服务器最高权限（后经人确认放宽为「交付可核查的攻击链与已确认漏洞报告」）。
+
+**规模**：55 条已完成意图、64 条事实节点、1 条确认漏洞，覆盖 59 台主机 / 64 个范围内资产（覆盖率 ≈48%）。
+
+**确认漏洞（1 条）**
+
+| 编号 | 资产 | 类别 | 等级 | 摘要 |
+|---|---|---|---|---|
+| finding_id=1 | space.bilibili.com | 未授权访问 / 敏感信息泄露 | low | Node.js（v18.16.0）渲染服务的 Prometheus `/metrics` 未鉴权。Gaia 风控按**字面路径**匹配，内层 openresty 解码 `%2e%2e` 后回源，故 `GET /x/%2e%2e/metrics` 返回 **HTTP 200 / 525,854 字节** 指标（进程 CPU/内存/fd、事件循环与 GC、`nodejs_version_info`、按 caller 与 Express 风格路由正则聚合的请求计数）。同前缀下 `/vars`、`/status`、`/debug/pprof/` 与 `api/member` 同名路径均 404，说明端点只存在于 space 后端。属信息泄露，本身不构成命令执行入口。 |
+
+> 证据形态：命令输出（未采集到流量记录——当时代理抓包链路返回空 200），且该端点后续复核时已被出口风控 412 拦下，不可稳定复现。
+
+**攻击链（止步于信息泄露层）**
+
+```
+[侦察] 20 个前台子域横向对比 → 统一自建边缘 CDN（blzone0x），回源后端分 6 类
+   └─ 真实业务后端仅 api（/x/ Go）、live（Fenice SSR/Koa）、space / data / cm 等少数
+       │
+[入口] space.bilibili.com  Gaia 字面匹配 vs openresty 解码不一致
+   └─ GET /x/%2e%2e/metrics → 200, 525KB Prometheus 指标
+       │
+[提权尝试 —— 全部否定]
+   ├─ /x/%2e%2e/actuator/{env,heapdump,mappings,health} → 后端真实 404（#482）
+   ├─ /x/%2e%2e/actuator/env → Gaia 412 风控页（#484）
+   ├─ /x/%2e%2e/{debug/pprof/,vars,status} → 真实 404（#482）
+   ├─ Node inspector（/json、/json/list、/json/version）→ 未开放（#483）
+   ├─ data.bilibili.com /log/%2f..%2factor%2f、/log/%2e%2e/actuator 系列 → openresty 1627 真 404（#476）
+   └─ 结论：无可达的调试协议 / actuator / 提权面
+       │
+[其他分支 —— 全部否定]
+   ├─ SSR 模板注入 / SSRF：live（Koa，Server-Timing 可见）+ e（Nuxt）均无求值、无外连（#454, #453）
+   ├─ api.bilibili.com /x/ 未登录越权：全部落在公开数据 / -101 / -352 / -799（#466）
+   ├─ pay / member S3 桶匿名读写：不成立（#415）；CORS 通配仅作用于静态外壳（#375, #416）
+   ├─ 请求走私（CL.TE / TE.CL / TE.TE / h2c）：边界层直接拒绝（#429）
+   ├─ cm.bilibili.com /fly/api/ Spring Boot：actuator / druid 全 404（#465, #468）
+   ├─ 源站直连 / 反代小段直连 / 真实 IP 头伪造：均被平台授权管控拦截（#367, #442, #431, #376）
+   └─ 邮件 / 客服 / 开发环境 / 死域：mail→Office365 302、service→504、ff-dev/ssr→NXDOMAIN（#405, #409, #395）
+```
+
+**结论**：确认 1 个 low 级未授权信息泄露；**RCE / 提权环节经实测确认不存在**，攻击链在 `/metrics` 信息泄露处终止，未能获得服务器权限。
+
+**本次测试对系统的验证点**：双图血缘链在 55 条意图规模下保持可追溯；否定结论（端口关闭 / 参数不可注入 / 未见入口）与正向发现一并入库，能让规划者及时止损、不重复派单；`steer_work` 与 `add_hint` 在人工介入（放宽目标、注入战略提示）时能即时生效。
+
+**能力边界**：APTEX可进行中低渗透测试，高顶渗透测试做不到
 
 ---
 
