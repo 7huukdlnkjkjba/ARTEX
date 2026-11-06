@@ -6,10 +6,11 @@ package chainskel
 // 蒸馏出处逐条对过原文(meta-orthogonal/meta-stuck-detect/meta-trust-obs/
 // meta-give-up/meta-priority/meta-close-the-kill),量化阈值按原文保留。
 
-// PlannerMetaRules 是 planner 版(13 条,覆盖优先级/放弃/正交换维/卡住信号/观测真伪/收口)。
+// PlannerMetaRules 是 planner 版(14 条,覆盖优先级/派单跳过/放弃/正交换维/卡住信号/观测真伪/收口)。
 const PlannerMetaRules = `
 
 ━━ meta 铁律(反问纪律,全程在场)━━
+- 派单先筛:已拉黑的「资产×探测类」、静态资源、CDN 边缘、历史 404-412 一律不派(add_intent 硬拒);高分端点(带 ID 参数/API/非常规端口/未鉴权面板)先打
 - 连续 15~25 次响应完全同质(无新状态码/长度/时序差异)=信息梯度为零,立即强制换维,别凭"感觉快成了"续命
 - 换的是维度(轴)非同轴参数值;转向前留挂起标记(卡点/已试/回捡条件),正交转向是排期不是放弃
 - 仍有细微差异(报错变/延迟变/行为分叉)即在爬坡可继续;输入全映射同一输出即平原,停枚举

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Autumn-27/artex/agent/chainskel"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
@@ -316,8 +317,9 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 1. **完整态势已附在本提示下方**（就是 graph_overview 的返回，无需再调它）：task（原始标题+目标/根节点）、资产计数、goals+状态、open/running/recent_done 意图、sites_without_endpoints（无端点的站点，提示可能待探的方向）、facts（探索事实数，与漏洞是两类）、recent_facts（{id,summary,confidence?}）。
    - **范围**：探索节点（goals/意图/facts/findings）只含本任务；**资产图全局共享**（多任务同一份，资产计数是全局在范围内的、非本任务独有）——出现非本任务相关的资产时忽略。
    - **血缘**：每个意图带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。
-   - **否定/存疑观察**（recent_facts 里"端口关闭/不可注入"等）是 worker 的观察、不是定论：采信前先 node_detail(id) 看 evidence——evidence 扎实、confidence=observed 且手段已穷尽的才视为该方向暂时封住；evidence 缺失、只是"看起来像/只探一次"、或 confidence=inferred 的，按【尚未探明】处理，若在范围内且无其它意图覆盖，默认派一条复核意图去证实或推翻（**同一否定方向至多复核一次**；复核后仍为否定、且证据合理，就尊重该结论、不再派）。
-   - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（pull：q 搜索、type/company_id/task_id 过滤、分页，或 id/ids 直取）、asset_neighbors。资产全局共享，别默认拉全量。
+   - **否定/已拉黑（硬规矩）**：「dispatch.negated」列出的「资产 × 探测类」已连续 404/412，属**已否定**目标——**禁止再派**同类探测（add_intent 会硬拒，换措辞重试也没用）；其余 recent_facts 里的"端口关闭/不可注入"等是 worker 的观察、不是定论：采信前先 node_detail(id) 看 evidence——evidence 扎实、confidence=observed 且手段已穷尽的才视为该方向暂时封住；evidence 缺失、只是"看起来像/只探一次"、或 confidence=inferred 的，按【尚未探明】处理，若在范围内且无其它意图覆盖，默认派一条复核意图去证实或推翻（**同一否定方向至多复核一次**；复核后仍为否定、且证据合理，就尊重该结论、不再派）。
+   - **派单评分（dispatch 块）**：「dispatch.targets」是按端点派发评分降序的高价值目标（带 ID 参数 / API 端点 / 非常规端口 / 未鉴权面板优先）；「dispatch.skipped」是静态资源 / CDN 边缘 / 历史 404-412 的硬过滤计数；「dispatch.negated」是已拉黑组合。**高分先打**，别先啃评分低或会被跳过的目标。
+   - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（pull：q 搜索、type/company_id/task_id 过滤、分页，或 id/ids 直取，返回带派发评分）、asset_neighbors。资产全局共享，别默认拉全量。
 
 2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
    - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
@@ -332,6 +334,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - 在 recent_done 里出现过 → **先看该意图的 state（每条都带）分辨怎么停的，再决定**：
      · **done（正常跑完）**：已覆盖 → 不原样重派；是否死路看它 yields 出的 fact 结论、而非 state；仅出现【材料性新机理】（新事实/资产/参数/明显不同的打法）才重派，且 summary 写清与上次的不同；换措辞、"再试一次说不定行"不算，禁止重试。
      · **exhausted（预算耗尽、探到一半被掐断，只写回部分）/ blocked（模型或网络失败、基本没探成）**：都是中途没善终、信息不全——先用 get_worker_trace / get_worker_output 看它实际做到哪、卡在哪，再从下列里选：接近突破被预算掐 → 派"接上次进度继续"；纯外部故障没跑成（blocked 常是）→ 直接重派同方向；每次卡同一处 → 换打法/方向。依据永远是 trace 里的真实进度，不是 state 本身。
+   - **端点优先级（高分先打）**：在未覆盖方向里先选 dispatch.targets 评分高的端点（带 ID 参数 / API / 非常规端口 / 未鉴权面板）；静态资源、CDN 边缘、历史 404/412、dispatch.negated 里的组合一律不派。把目标资产 id 填进 asset_ids，系统会按评分自动定 priority（省略 priority 即可）；只有要人工覆盖评分时才显式给 1-4 或 6-10（5 视同未指定）。
    - 完全无任何意图覆盖的全新方向 → 生成。
    - 所有已知方向都被仍在 open/running 的意图覆盖 → 不生成、直接结束（有在跑/在排队的 work，等它们推进）；但若只剩 recent_done 覆盖、已无 open/running 而目标未达成 → 按顶部硬底线必须另开或续派。
    - **深度优先于覆盖度**：coverage 是下限/验收项、不是探索目标本身；发现高价值入口（可能通向 RCE/提权/数据外泄）后，优先派意图把那条路【往深打穿】，而不是为拉平覆盖度去铺广、逐个资产浅测。
@@ -341,14 +344,15 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 5. **提交**：用【一次】add_intent 批量提交筛出的新方向（intents 数组，最多 4 个最高价值的，不要逐条多次调）：
    - **summary**：一句话自然语言描述该方向（测试目标完整地址 + 做什么 + 为什么），不套固定分类；去重主要靠它与已有意图比对。
-   - **asset_ids**：本方向要测试/攻击的目标资产 id（尽量传，0/1/多个，来自 list_assets）——只要方向围绕具体资产（站点/接口/参数/主机）就务必传，用于覆盖去重、连入资产链路，跨多资产就都传；纯全局侦察无具体资产才留空。
+   - **asset_ids**：本方向要测试/攻击的目标资产 id（尽量传，0/1/多个，来自 list_assets / dispatch.targets）——只要方向围绕具体资产（站点/接口/参数/主机）就务必传：系统据此做派发评分、自动定优先级、并跳过静态资源/CDN/404-412/已否定目标；不传就无法评分，也挡不住已否定目标。纯全局侦察无具体资产才留空。
+   - **priority**：可省略（0/5 都视为未指定，按绑定资产的派发评分自动定档，推荐）；只在要人工覆盖评分时显式给 1-4 或 6-10。
    - **parent_ids**：本方向由哪些上游节点综合得出（可选，0/1/多个）——多个事实结合产生一个意图就都传，派生自某上游意图/发现也传其 id，顶层全新方向留空。
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
 
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + artifactSpec(workDir)
+	return body + artifactSpec(workDir) + chainskel.PlannerMetaRules
 }
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution

@@ -24,6 +24,12 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 		var p map[string]any
 		_ = json.Unmarshal(n.Payload, &p)
 		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State}
+		if n.Priority > 0 {
+			m["priority"] = n.Priority // frontier 按 priority DESC 领取；让规划者看得到排序依据
+		}
+		if ds, ok := p["dispatch_score"]; ok && ds != nil {
+			m["dispatch_score"] = ds
+		}
 		if n.Inherited {
 			m["source_task_id"] = n.SourceTaskID
 			m["inherited"] = true
@@ -525,6 +531,13 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				})
 			}
 			out["honeypot_assets"] = plist
+		}
+	}
+	// 派单评分：未测资产里按端点派发评分降序的高价值目标 + 被硬跳过/已否定的计数。
+	// 让 planner 每轮先看到"该打谁、谁不该再打"，不必额外调 list_assets 也能排序。
+	if t.as != nil && t.ts != nil && t.taskID > 0 && !t.coverageDisabled {
+		if block := t.dispatchOverview(factNodes); len(block) > 0 {
+			out["dispatch"] = block
 		}
 	}
 	// recent_facts：非折叠事实里最新的一窗（≤N，factNodes 按 id 降序即最新在前）。已折进
@@ -1094,40 +1107,58 @@ type intentItem struct {
 	ChainTags []string          `json:"chain_tags"`
 }
 
+// intentDispatchResult 是一条意图的派发元信息（用于工具返回/排障）：
+// priority 可能由端点评分自动定档，skipped 是绑定了但被硬跳过规则的资产。
+type intentDispatchResult struct {
+	Priority     int
+	Score        int
+	AutoPriority bool
+	Skipped      []string
+}
+
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
 // 约束：意图只能锚在已确认知识上——每个 parent_id 必须是已存在的 fact/finding
 // 节点（不能挂在别的意图/目标/提示上）。顶层全新方向留空 parent_ids，兜底连 origin fact。
 // 这样"每个意图都连到 fact 节点、且是发现驱动而非凭空规划"从创建路径上被强制。
+// 保留旧签名给测试/非 planner 调用方；实际派发筛选走 addOneIntentChecked。
 func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
+	id, _, err := t.addOneIntentChecked(it, nil)
+	return id, err
+}
+
+// addOneIntentChecked 是 addOneIntent 的派发筛选版：
+//   - 先对绑定的资产做派发评分（带 ID 参数/API/非常规端口/未鉴权面板加分），
+//     静态资源、CDN 边缘、历史 404/412 直接跳过；
+//   - 再查否定索引，同资产同探测类已连续 404/412 的组合直接跳过；
+//   - 全部目标都被跳过时拒派（不占 frontier 名额）；部分被跳过时只保留可派资产；
+//   - priority 省略（<=0）时按剩余资产的最高评分自动定档。
+func (t *ToolSet) addOneIntentChecked(it intentItem, neg *NegationIndex) (int64, intentDispatchResult, error) {
+	meta := intentDispatchResult{}
 	if strings.TrimSpace(it.Summary) == "" {
-		return 0, fmt.Errorf("summary 不能为空")
+		return 0, meta, fmt.Errorf("summary 不能为空")
 	}
 	// chain_tags(L3 反问骨架路由标签):取值 ∈ chainskel.Categories,至多 2 个。
 	tags := chainskel.NormalizeChainTags(it.ChainTags)
 	if err := chainskel.ValidateChainTags(tags); err != nil {
-		return 0, err
+		return 0, meta, err
 	}
 	// 先校验锚点（建节点前，避免坏锚点留下孤儿意图）。
 	parents := pidList(it.ParentIDs)
 	for _, pidv := range parents {
 		n, err := t.ts.GetNodeWithSources(pidv)
 		if err != nil || n == nil {
-			return 0, fmt.Errorf("parent_id %d 不存在于本任务或直接关联任务：parent_ids 必须是已存在的【事实(fact)/发现(finding)】节点 id；顶层全新方向请留空 parent_ids", pidv)
+			return 0, meta, fmt.Errorf("parent_id %d 不存在于本任务或直接关联任务：parent_ids 必须是已存在的【事实(fact)/发现(finding)】节点 id；顶层全新方向请留空 parent_ids", pidv)
 		}
 		if n.Kind != db.KindFact && n.Kind != db.KindFinding {
-			return 0, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
+			return 0, meta, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
 		}
-	}
-	priority := it.Priority
-	if priority == 0 {
-		priority = 5
 	}
 	anchors := pidList(it.AssetIDs)
 	// 资产拦截：意图绑定的资产若命中系统资产拦截规则，则禁止下发该意图。
 	if t.as != nil && len(anchors) > 0 {
 		hits, err := t.as.CheckAssetsIntercept(t.taskID, anchors)
 		if err != nil {
-			return 0, fmt.Errorf("资产拦截校验失败：%w", err)
+			return 0, meta, fmt.Errorf("资产拦截校验失败：%w", err)
 		}
 		if len(hits) > 0 {
 			var b strings.Builder
@@ -1135,9 +1166,43 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			for _, h := range hits {
 				fmt.Fprintf(&b, "\n - %s", h.Describe())
 			}
-			return 0, fmt.Errorf("%s", b.String())
+			return 0, meta, fmt.Errorf("%s", b.String())
 		}
 	}
+
+	// 派活前筛选：端点评分 + 硬跳过（静态/CDN/404-412/已否定）。
+	probe := probeKindForText(it.Summary)
+	kept, skipped, score, reasons := t.screenDispatchAnchors(anchors, probe, neg)
+	if len(anchors) > 0 && len(kept) == 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "意图「%s」绑定的资产全部命中派单硬跳过规则，已拒绝派发（不占 frontier 名额）：", it.Summary)
+		for _, s := range skipped {
+			fmt.Fprintf(&b, "\n - %s", s)
+		}
+		b.WriteString("\n规则：静态资源 / CDN 边缘 / 历史 404-412 不派；同一资产同一类探测连续 404/412 已否定的组合不派。请改绑其它可测资产，或换一个探测类型。")
+		return 0, meta, fmt.Errorf("%s", b.String())
+	}
+	anchors = kept
+
+	priority := it.Priority
+	// 旧 schema 的默认档是 5，模型常把 5 显式回填。把 0/5 都视同"未指定"，否则评分
+	// 永远拿不到控制权；其它显式值（1-4 / 6-10）视为真正的人工覆盖。
+	if priority <= 0 || priority == 5 {
+		if len(anchors) > 0 {
+			priority = DispatchPriorityForScore(score)
+			meta.AutoPriority = true
+		} else {
+			priority = 5
+		}
+	}
+	if priority > 10 {
+		priority = 10
+	}
+	if priority < 1 {
+		priority = 1
+	}
+	meta.Priority, meta.Score, meta.Skipped = priority, score, skipped
+
 	payload := map[string]any{"summary": it.Summary}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
@@ -1145,9 +1210,19 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(tags) > 0 {
 		payload["chain_tags"] = tags
 	}
+	if score > 0 {
+		payload["dispatch_score"] = score
+		payload["dispatch_probe"] = probe
+	}
+	if len(reasons) > 0 {
+		payload["dispatch_reasons"] = reasons
+	}
+	if len(skipped) > 0 {
+		payload["dispatch_skipped"] = skipped // 审计：哪些绑定资产被硬跳过、为什么
+	}
 	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
 	if err != nil {
-		return 0, err
+		return 0, meta, err
 	}
 	// upstream lineage: link each (validated) fact/finding parent → this intent, so
 	// "multiple facts combine into one new intent" is expressible.
@@ -1162,18 +1237,75 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			_ = t.ts.Link(origin, db.RelDerivedFrom, id)
 		}
 	}
-	return id, nil
+	return id, meta, nil
+}
+
+// screenDispatchAnchors 对意图绑定的资产做派发筛选，返回可派资产、被跳过说明
+// 以及剩余资产的最高派发评分/依据。nil NegationIndex 表示不做否定检查。
+func (t *ToolSet) screenDispatchAnchors(ids []int64, probe string, neg *NegationIndex) (kept []int64, skipped []string, maxScore int, reasons []string) {
+	if len(ids) == 0 {
+		return nil, nil, 0, nil
+	}
+	byID := map[int64]*db.Asset{}
+	if t.as != nil {
+		var (
+			assets []*db.Asset
+			err    error
+		)
+		if t.taskID > 0 {
+			assets, err = t.as.GetByIDsInScope(t.taskID, ids)
+		} else {
+			assets, err = t.as.GetByIDs(ids)
+		}
+		if err == nil {
+			for _, a := range assets {
+				byID[a.ID] = a
+			}
+		}
+	}
+	seen := map[int64]struct{}{}
+	for _, id := range ids {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		a := byID[id]
+		if a == nil { // 查不到（越界/已删）——交给既有范围校验，这里不擅自丢
+			kept = append(kept, id)
+			continue
+		}
+		d := EvaluateAssetDispatch(a)
+		if d.Skip != "" {
+			skipped = append(skipped, fmt.Sprintf("资产 #%d %s：%s", id, assetDispatchLabel(a), d.Skip))
+			continue
+		}
+		if h, blocked := neg.blocked(a, probe); blocked {
+			why := "已否定"
+			if h != nil {
+				why = fmt.Sprintf("已否定（%s 类探测连续 %d 次 %d）", h.Probe, h.Hits, h.LastStatus)
+			}
+			skipped = append(skipped, fmt.Sprintf("资产 #%d %s：%s", id, assetDispatchLabel(a), why))
+			continue
+		}
+		kept = append(kept, id)
+		if d.Score > maxScore {
+			maxScore = d.Score
+			reasons = d.Reasons
+		}
+	}
+	return kept, skipped, maxScore, reasons
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
+		"系统先做派单筛选：绑定资产若是静态资源 / CDN 边缘 / 历史 404-412，或同一资产同一类探测已连续 404/412（已否定），会被直接跳过；全部目标都被跳过时拒派。priority 省略（0/5）时按资产派发评分自动定档——带 ID 参数 / API / 非常规端口 / 未鉴权面板的端点得分高、先打。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
 			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority/chain_tags）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
+			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。系统据此做派发评分、自动定优先级、并跳过静态资源/CDN/404-412/已否定目标；不传就无法评分，也挡不住已否定目标。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
-			"priority":   intp("优先级 0-10，默认5"),
+			"priority":   intp("优先级 1-10；省略/0/5（旧默认档） = 按绑定资产的派发评分自动定档（推荐）；其它显式值覆盖评分。"),
 			"chain_tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "攻击面链标签（可选，1-2 个，取值仅限 web/ad/app/priv/pwn/recon/rev/pivot/meta）：按该方向的主要攻击面打标，引擎据此给执行 worker 注入对应场景的反问决策骨架（场景→判据→转向）。拿不准按关键词选（sql/注入→web、域/kerberos→ad、提权→priv、隧道/代理/横向→pivot、逆向/脱壳→rev、堆/栈/ctf→pwn、侦察/指纹→recon、apk/frida/小程序→app）；实在拿不准留空，引擎按 summary 关键词自动匹配。"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -1189,15 +1321,18 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			}
 
 			ids := make([]int64, len(items))
+			dispatch := make([]intentDispatchResult, len(items))
 			errs := map[string]string{}
 			createdAny := false
+			neg := buildNegationIndex(t.ts, nil) // 本轮否定索引：同资产同类探测已 404/412 的组合直接跳过
 			for i, it := range items {
-				id, err := t.addOneIntent(it)
+				id, meta, err := t.addOneIntentChecked(it, neg)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue
 				}
 				ids[i] = id
+				dispatch[i] = meta
 				createdAny = true
 			}
 
@@ -1213,11 +1348,35 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				if e, bad := errs["0"]; bad {
 					return actool.Errorf(e), nil
 				}
-				return actool.Text(fmt.Sprintf("intent created: %d", ids[0])), nil
+				msg := fmt.Sprintf("intent created: %d", ids[0])
+				if dispatch[0].AutoPriority {
+					msg += fmt.Sprintf("（自动优先级 %d，端点评分 %d）", dispatch[0].Priority, dispatch[0].Score)
+				}
+				if len(dispatch[0].Skipped) > 0 {
+					msg += "\n已跳过不可派资产：\n - " + strings.Join(dispatch[0].Skipped, "\n - ")
+				}
+				return actool.Text(msg), nil
 			}
 			out := map[string]any{"ids": ids}
 			if len(errs) > 0 {
 				out["errors"] = errs
+			}
+			var dispatchOut []map[string]any
+			for i, meta := range dispatch {
+				if !meta.AutoPriority && len(meta.Skipped) == 0 {
+					continue
+				}
+				item := map[string]any{"index": i, "priority": meta.Priority, "score": meta.Score}
+				if meta.AutoPriority {
+					item["auto_priority"] = true
+				}
+				if len(meta.Skipped) > 0 {
+					item["skipped"] = meta.Skipped
+				}
+				dispatchOut = append(dispatchOut, item)
+			}
+			if len(dispatchOut) > 0 {
+				out["dispatch"] = dispatchOut
 			}
 			return jsonResult(out)
 		})
@@ -1479,10 +1638,17 @@ func isNegativeConclusion(text string) bool {
 // factDowngradeNote 阴性结论被自动降级时在工具返回里告知模型的话术。
 const factDowngradeNote = "阴性结论已标 inferred（不可直接当铁案事实）；用成熟工具/直接证据复核后可调 confirm_fact 升级为 confirmed。"
 
-// recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
-// 批量时的默认意图（本条未给 intent_id 时用）。note 非空时是要随工具返回告知模型的
-// 提示（目前只有阴性结论被自动降级 inferred 这一种）。
+// recordOneFact 保留旧签名（不带否定索引）供测试/单条调用；实际落库走
+// recordOneFactChecked，nil 索引表示不参与跨事实的 404/412 连续计数。
 func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, string, error) {
+	return t.recordOneFactChecked(it, defaultIntent, nil)
+}
+
+// recordOneFactChecked 写一条 fact 节点并连到意图（intent→yields→fact）。
+// defaultIntent 为批量时的默认意图（本条未给 intent_id 时用）；neg 是本批共享的
+// 否定索引（可为 nil）。note 非空时是要随工具返回告知模型的提示：阴性结论被降级
+// inferred，或本次记录让「资产 × 探测类」连续 404/412 达到阈值、已被自动拉黑。
+func (t *ToolSet) recordOneFactChecked(it factItem, defaultIntent int64, neg *NegationIndex) (int64, string, error) {
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, "", fmt.Errorf("summary 不能为空")
 	}
@@ -1493,10 +1659,11 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, string
 	if e := strings.TrimSpace(it.Evidence); e != "" {
 		payload["evidence"] = e
 	}
+	text := it.Summary + "\n" + it.Detail
 	// confidence 永远落库（默认 observed）——红日3 复盘：阴性结论强制降级 inferred。
 	conf := normalizeFactConfidence(it.Confidence)
 	var note string
-	if conf == FactConfidenceObserved && isNegativeConclusion(it.Summary+"\n"+it.Detail) {
+	if conf == FactConfidenceObserved && isNegativeConclusion(text) {
 		conf = FactConfidenceInferred
 		note = factDowngradeNote
 	}
@@ -1511,13 +1678,66 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, string
 			return 0, "", fmt.Errorf("intent_id 必须是本任务的意图（关联任务意图只读）")
 		}
 	}
+	// 资产锚点：显式 asset_ids 优先；否则仅在意图只有【一个】锚点时继承——多锚点
+	// 意图无法判断本次 404 属于哪个资产，盲目继承会把整个意图的目标全拉黑。
+	assetIDs := pidList(it.AssetIDs)
+	if len(assetIDs) == 0 && intent > 0 {
+		if anchors, err := t.ts.Anchors(intent); err == nil && len(anchors) == 1 {
+			assetIDs = anchors
+		}
+	}
+
+	// 404/412 自动拉黑：同一资产同一类探测连续命中即记 negated，add_intent 直接跳过。
+	fullText := text + "\n" + it.Evidence
+	statuses := httpMissStatuses(fullText)
+	probe := ""
+	if isNegativeConclusion(fullText) || len(statuses) > 0 {
+		probe = probeKindForText(fullText)
+		payload["probe"] = probe
+	}
+	status := 0
+	if len(statuses) > 0 {
+		status = statuses[len(statuses)-1]
+		payload["http_status"] = status
+	}
+	var negatedAssets []int64
+	negatedHits := 0
+	if status > 0 && len(assetIDs) > 0 {
+		for _, aid := range assetIDs {
+			if hits, ok := neg.wouldNegate(aid, probe); ok {
+				negatedAssets = append(negatedAssets, aid)
+				if hits > negatedHits {
+					negatedHits = hits
+				}
+			}
+		}
+	}
+	if len(negatedAssets) > 0 {
+		payload["negated"] = true
+		payload["negation"] = map[string]any{
+			"probe":     probe,
+			"status":    status,
+			"hits":      negatedHits,
+			"asset_ids": negatedAssets,
+		}
+	}
+
 	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, assetIDs)
 	if err != nil {
 		return 0, "", err
 	}
 	if intent > 0 {
 		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
+	}
+	if status > 0 && len(assetIDs) > 0 {
+		for _, aid := range assetIDs {
+			neg.recordHit(aid, probe, status, id)
+		}
+	}
+	if len(negatedAssets) > 0 {
+		note = fmt.Sprintf("已标记否定并拉黑：资产 %s 的 %s 类探测连续 %d 次 %d，后续 add_intent 将直接跳过该组合（除非出现新的成功证据）。",
+			formatAssetIDs(negatedAssets), probe, negatedHits, status)
 	}
 	t.writes.Facts++
 	return id, note, nil
@@ -1531,6 +1751,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · evidence=支撑本结论的【一行】关键证据（命令+最能证明的那一两行输出），**务必简洁**——细节已在 detail，这里不要再粘大段输出。\n"+
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断/间接证据/自研工具的阴性结论）| confirmed（经复核/成熟工具坐实——一般由 confirm_fact 升级而来，不要直接自标）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。\n"+
+		"  · **404/412 必须记**：同一资产同一类探测连续出现 404/412（≥2 次）时，系统会自动把该「资产 × 探测类」标为已否定并拉黑，之后 add_intent 直接跳过；吞掉不记会让 planner 反复重试。\n"+
 		"  · 系统规则：文本含\"不可用/被封/无响应/不存在/不支持/blocked/unreachable\"等阴性结论特征时，observed 会被【自动降为 inferred】并在返回里提示；之后你用成熟工具/直接证据复核坐实了，再调 confirm_fact 升级为 confirmed。",
 		obj(map[string]any{
 			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
@@ -1539,7 +1760,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
 			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
 			"confidence": str("observed（输出里直接看到）| inferred（据现象推断/间接证据/自研工具阴性结论）| confirmed（一般由 confirm_fact 复核升级，勿直接自标）。否定结论务必如实标注。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
+			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产。阴性/404-412 结论务必传——系统靠它做「资产 × 探测类」拉黑；意图只有一个锚点时才会自动继承。"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1557,8 +1778,9 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
 			notes := map[string]string{}
+			neg := buildNegationIndex(t.ts, nil) // 同一批 facts 内也能连续累计 404/412
 			for i, it := range items {
-				id, note, err := t.recordOneFact(it, defaultIntent)
+				id, note, err := t.recordOneFactChecked(it, defaultIntent, neg)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue

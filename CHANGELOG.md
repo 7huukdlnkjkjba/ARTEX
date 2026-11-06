@@ -6,6 +6,20 @@
 
 ### 修改的功能
 
+- **派单前端点评分与硬跳过**：`add_intent` 现在先按绑定资产做派发评分——带 ID 参数 /
+  API 端点 / 非常规端口 / 未鉴权面板得分高，`priority` 省略（或沿用旧默认 5）时自动
+  按评分定档，frontier 高分先领；静态资源、CDN 边缘节点、历史响应 404/412 的资产直接
+  跳过不派，全部目标都被跳过时拒派且不占 frontier 名额。`graph_overview` 新增
+  `dispatch` 块（targets / skipped / negated），`list_assets` 与
+  `list_untested_assets` 返回评分与跳过标注并降序排列。
+- **404/412 连续失败自动拉黑**：`record_fact` 检测到同一资产同一类探测连续两次
+  404/412 时，会在事实 payload 写入 `negated`/`negation` 并把该「资产 × 探测类」加入
+  否定索引；后续 `add_intent` 读到已否定组合直接拒派（endpoint 资产确认不存在后，
+  任何探测类都不再派）。旧的 fact 图也会在每轮被扫描聚合，历史"没有"结论同样生效。
+- **planner 提示词接入派单硬规矩**：新增「否定/已拉黑」「派单评分」「端点优先级」
+  段落，并把「已拉黑的资产×探测类 / 静态资源 / CDN 边缘 / 历史 404-412 不派」写入
+  代码固定的 planner meta 铁律；同时修复 `plannerSystem` 未追加 `PlannerMetaRules`
+  导致该铁律一直缺失的问题。
 - **修复 planner 空转导致任务永不落终态**：目标无法被 `prove_goal` 收口时（典型是 finding
   仍 pending），planner 会一轮轮重复规划、任务长期停在 `running` 并持续烧 token。现于
   `plannerLoop` 增加空转保护：连续 `plannerStallRounds`(3) 轮「图谱计数无变化 + 无在跑意图 +

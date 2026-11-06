@@ -506,8 +506,9 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 	return readTool(
 		"list_untested_assets",
 		"查询【本任务及直接关联任务】范围内、还没被事实锚点覆盖的资产（关联范围只读，供你自己判断要不要补测，不代替你决策）。\n"+
+			"返回按【端点派发评分】降序：带 ID 参数 / API 端点 / 非常规端口 / 未鉴权面板的资产排在前面；静态资源、CDN 边缘、历史 404-412 带 dispatch_skip 并沉底，已连续 404/412 的否定组合带 dispatch_negated。\n"+
 			"可选按资产类型过滤：root_domain/subdomain/service/app/endpoint/ip。\n"+
-			"分页：page 从 1 起、page_size 默认 10。返回 {assets:[{id,type,label}], total, page, page_size}。仅任务上下文可用。",
+			"分页：page 从 1 起、page_size 默认 10。返回 {assets:[...], total, page, page_size}。仅任务上下文可用。",
 		obj(map[string]any{
 			"type":      str("资产类型过滤（可选）：root_domain/subdomain/service/app/endpoint/ip"),
 			"page":      intp("页码，从 1 起（默认 1）"),
@@ -537,8 +538,59 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			// 补全资产字段并打分：page 内按派发评分降序，skip 目标沉底。
+			ids := make([]int64, 0, len(assets))
+			for _, c := range assets {
+				ids = append(ids, c.ID)
+			}
+			full, _ := t.as.GetByIDsInScope(t.taskID, ids)
+			byID := map[int64]*db.Asset{}
+			for _, x := range full {
+				byID[x.ID] = x
+			}
+			ordered := make([]*db.Asset, 0, len(ids))
+			for _, id := range ids {
+				if x := byID[id]; x != nil {
+					ordered = append(ordered, x)
+				}
+			}
+			neg := buildNegationIndex(t.ts, nil)
+			views := t.annotateAssets(ordered, neg)
+			if len(views) == 0 && len(assets) > 0 {
+				// 资产详情补全失败时退回原来的紧凑视图，不能因打分把整页吞掉。
+				compact := make([]map[string]any, 0, len(assets))
+				for _, c := range assets {
+					compact = append(compact, map[string]any{"id": c.ID, "type": c.Type, "label": c.Label})
+				}
+				return jsonResult(map[string]any{
+					"assets": compact, "total": total, "page": a.Page, "page_size": a.PageSize,
+				})
+			}
+			skipped := 0
+			outAssets := make([]map[string]any, 0, len(views))
+			for _, v := range views {
+				item := map[string]any{
+					"id":                v.ID,
+					"type":              v.Type,
+					"label":             assetDispatchLabel(v.Asset),
+					"dispatch_score":    v.DispatchScore,
+					"dispatch_priority": v.DispatchPriority,
+				}
+				if len(v.DispatchReasons) > 0 {
+					item["dispatch_reasons"] = v.DispatchReasons
+				}
+				if v.DispatchSkip != "" {
+					item["dispatch_skip"] = v.DispatchSkip
+					skipped++
+				}
+				if len(v.DispatchNegated) > 0 {
+					item["dispatch_negated"] = v.DispatchNegated
+				}
+				outAssets = append(outAssets, item)
+			}
 			return jsonResult(map[string]any{
-				"assets": assets, "total": total, "page": a.Page, "page_size": a.PageSize,
+				"assets": outAssets, "total": total, "page": a.Page, "page_size": a.PageSize,
+				"skipped_in_page": skipped,
 			})
 		},
 	)
@@ -549,6 +601,7 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 	return readTool(
 		"list_assets",
 		"查询资产库：DSL 表达式搜索，或按 id/ids 直取；支持分页。只返回【本任务及直接关联任务】测试范围内的资产。\n"+
+			"返回按【端点派发评分】降序（带 ID 参数 / API 端点 / 非常规端口 / 未鉴权面板优先）：每条带 dispatch_score / dispatch_priority；静态资源、CDN 边缘、历史 404-412 带 dispatch_skip；已连续 404/412 的否定组合带 dispatch_negated。高分先打，dispatch_skip 的目标别派。\n"+
 			"DSL：field=value 模糊(ILIKE) | field==value 精确 | field!=value 排除 | 数字字段支持 > >= < <= | 裸词=全文模糊；AND/OR 组合(AND 优先级高)，可用括号分组。资产类型用独立 type 参数，不写进 DSL。\n"+
 			"未传 id/ids 时 dsl 必须非空（不允许无条件全量查询）。\n"+
 			"可用字段：domain(根/子/服务域名)、root_domain、ip、url、page_title、icp、service_name、app_name、method(如 GET/POST)、service_type(http|other)、record_type(如 A/CNAME)、technology(数组，=模糊 ==精确)、port/status_code/company_id(整数)。\n"+
@@ -593,9 +646,11 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf("DSL 错误: " + err.Error()), nil
 			}
+			neg := buildNegationIndex(t.ts, nil)
+			views := t.annotateAssets(assets, neg)
 			return jsonResult(map[string]any{
-				"count":  len(assets),
-				"assets": assets,
+				"count":  len(views),
+				"assets": views,
 			})
 		},
 	)

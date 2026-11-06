@@ -255,6 +255,86 @@ func (s *ExplorationStore) Anchor(nodeID, assetID int64) error {
 	return err
 }
 
+// Anchors returns the asset ids a node is anchored to (ascending). Used by the
+// dispatch guard to inherit an intent's target assets when record_fact omits
+// asset_ids (a negative 404/412 fact must be attributable to the asset it
+// refuted, otherwise the planner cannot blacklist the pair).
+func (s *ExplorationStore) Anchors(nodeID int64) ([]int64, error) {
+	if nodeID <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT asset_id FROM exploration_anchors WHERE node_id=$1 ORDER BY asset_id`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// NodeAnchorMap returns node_id → anchored asset ids for the requested nodes in
+// one query (asset ids ascending per node). Missing nodes simply have no entry.
+// The dispatch/negation index uses it to fold facts into (asset, probe) pairs.
+func (s *ExplorationStore) NodeAnchorMap(nodeIDs []int64) (map[int64][]int64, error) {
+	out := make(map[int64][]int64, len(nodeIDs))
+	if len(nodeIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(`SELECT node_id, asset_id FROM exploration_anchors
+WHERE node_id = ANY($1::bigint[]) ORDER BY node_id, asset_id`, nodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var nodeID, assetID int64
+		if err := rows.Scan(&nodeID, &assetID); err != nil {
+			return nil, err
+		}
+		out[nodeID] = append(out[nodeID], assetID)
+	}
+	return out, rows.Err()
+}
+
+// FactIntentAssetMap maps fact id → the anchored asset ids of the intent that
+// yielded it, limited to facts that have NO direct anchor row. Legacy record_fact
+// calls (before facts inherited intent anchors) still need to be attributable to
+// the asset they refuted so the planner can honor historical negative results.
+// One query, scoped to this exploration.
+func (s *ExplorationStore) FactIntentAssetMap(factIDs []int64) (map[int64][]int64, error) {
+	out := make(map[int64][]int64, len(factIDs))
+	if len(factIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(`
+SELECT edge.dst_id, anchor.asset_id
+FROM exploration_edges edge
+JOIN exploration_anchors anchor ON anchor.node_id = edge.src_id
+WHERE edge.exploration_id=$1 AND edge.rel=$2
+  AND edge.dst_id = ANY($3::bigint[])
+  AND NOT EXISTS (SELECT 1 FROM exploration_anchors direct WHERE direct.node_id = edge.dst_id)
+ORDER BY edge.dst_id, anchor.asset_id`, s.expID, RelYields, factIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var factID, assetID int64
+		if err := rows.Scan(&factID, &assetID); err != nil {
+			return nil, err
+		}
+		out[factID] = append(out[factID], assetID)
+	}
+	return out, rows.Err()
+}
+
 // Link adds a typed exploration edge (idempotent).
 func (s *ExplorationStore) Link(from int64, rel string, to int64) error {
 	_, err := s.db.Exec(`
