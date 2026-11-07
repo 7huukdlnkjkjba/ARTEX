@@ -63,11 +63,20 @@ type ToolSet struct {
 	// to a target (currently ad_kerberoast). nil = no credential store wired: the
 	// tool then only accepts explicitly-passed username/password/hash.
 	credSource CredentialSource
-	as         *db.AssetStore   // asset store (optional; nil = asset tools not available)
-	cs         *db.CompanyStore // company store (optional)
-	ts         *db.ExplorationStore
-	worker     string
-	taskID     int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	// httpProxyAddr/httpProxyCA are the per-run egress proxy (recording MITM or
+	// task tunnel) for in-process HTTP tools such as recon_http/http_diff. Empty =
+	// direct. Kept on ToolSet so these tools reuse exactly the same egress path as
+	// Bash, preserving traffic recording and task-level proxy binding.
+	httpProxyAddr string
+	httpProxyCA   string
+	// httpUA is the task's stable client User-Agent (Batch 5 B4), so in-process
+	// recon requests look consistent with Bash/curl requests in the same task.
+	httpUA string
+	as     *db.AssetStore   // asset store (optional; nil = asset tools not available)
+	cs     *db.CompanyStore // company store (optional)
+	ts     *db.ExplorationStore
+	worker string
+	taskID int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the

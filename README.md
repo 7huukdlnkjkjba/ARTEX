@@ -20,12 +20,14 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.19** | **Exploit Author + Vuln Hunter**：Metasploit 无确定性路径的确认漏洞自动转交 `exploit_author` 意图，用 `exploit_init/write/run/verify/abandon` 写出并验证真实 exp；新增 `vulnhunt` 意图与 `vulnhunt_init/build/fuzz/triage/report` 工具，对本地仓库/二进制做 fuzzing、按 sanitizer 栈去重并提升为 finding|
 | **v0.3.20** | **WAF 绕过预筛**：新增人工接口 `POST /api/waf-probe`，先识别 WAF 指纹，再把同一条 SQL 注入意图用 8 种编码/变形重放，返回 `bypassable`/`hard`/`skip`、0-100 评分与逐条证据（`server/waf_bypass_probe.go`） |
 | **v0.3.21** | **AD 与侦察工具化**：新增 worker 工具 `ad_kerberoast`（Kerberoasting：枚举/定向 TGS、RC4+AES 哈希解析、凭据库/scope/dry-run、finding/fact 回写）与 `scan_rustscan`（RustScan TCP 全端口扫描：结构化开放端口、CIDR 保护、scope、fact 回写）；端口扫描强制走 `scan_rustscan`，执行归代码、决策归 AI |
+| **v0.3.22** | **HTTP 黑盒工具化**：新增 worker 工具 `recon_http`（单请求侦察：状态/头/体预览/重定向/超时/错误分类，走任务代理与录制）与 `http_diff`（基线 vs 变体：状态翻转/长度/内容相似度信号，支持 IDOR/越权/注入/认证差异）；HTTP 侦察优先走工具，执行归代码、决策归 AI |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
 - Exploit Author / Vuln Hunter：见下文「Exploit Author 与 Vuln Hunter（0.3.19）」
 - WAF 绕过预筛（`POST /api/waf-probe`）：见下文「WAF 绕过预筛（0.3.20）」
 - AD 与端口扫描工具（`ad_kerberoast` / `scan_rustscan`）：见下文「AD 与端口扫描工具（0.3.21）」
+- HTTP 黑盒侦察与差分（`recon_http` / `http_diff`）：见下文「HTTP 黑盒侦察与差分（0.3.22）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -306,6 +308,47 @@ TLS 校验关闭以兼容自签名靶场。本接口只做「预筛」，真正�
 
 两个工具都会在启动时由 `BuiltinToolSeeds()` seed 进 `tools` 表并默认绑定 `worker`；**重启 ARTEX 后生效**，
 无需 SQL 迁移。目标在隔离内网时，先从立足点建隧道/会话，本工具默认从 ARTEX 宿主发起。
+
+---
+
+## HTTP 黑盒侦察与差分（0.3.22）
+
+`recon_http` 与 `http_diff` 都是 **Go 进程内 HTTP 客户端**（不依赖 curl/外部二进制），并复用 worker 的
+per-run 出口：任务录制 MITM → 任务隧道 SOCKS5 → 全局代理 → 直连。因此这些请求会进入流量留痕，
+也能走内网隧道，而不是绕过平台直连。
+
+### `recon_http`（T1595）
+
+对单个 URL 发一次 HTTP(S) 请求，替代模型手搓 `curl`：
+
+- 返回 `status_code`、`headers`（多值，含 Set-Cookie）、`body_preview`（前 4KB）、`body_len`、
+  `final_url`、`redirects`、`elapsed_ms` 与结构化 `error/error_kind`。
+- 工具不自动维护 cookie jar；需要同一会话时把 Cookie/Authorization 放进 `headers`。
+- 默认不跟随重定向；`follow=true` 最多 5 跳，**每一跳都校验 scope**，防止重定向越界。
+- 默认 `insecure=true` 兼容自签名靶场；设 `insecure=false` 时使用系统 CA + 任务 MITM CA。
+- `dry_run=true` 只校验 URL/scope/代理配置，不发请求。
+- 不自动写 fact/finding：状态码/响应头/预览是证据，是否记为结论由模型判断。
+
+### `http_diff`（T1595）
+
+黑盒差分核心：同一 URL 模板发一次基线 + 多个变体，输出可行动信号：
+
+- 参数：`url_template`（含 `{v}`）、`baseline`、`variants`（去重、最多 20）、`method`、
+  `headers`、`body_template`、`follow`、`insecure`、`timeout_sec`（整次总预算）、`dry_run`。
+- 强制同一主机：`{v}` 只能改路径/查询/请求体，**不能改主机名**，避免借模板越权扫描。
+- 信号：`status_flip`（状态变到 2xx/3xx）、`status_diff`（其他状态变化）、`len_diff_40pct`、
+  `len_diff_from_empty`、`content_diff`、`content_diff_same_size`；附带 `similarity`、`len_delta`、
+  `content_changed`、`preview`、`body_sha256`。
+- 工具不自动维护 cookie jar；基线/变体共用 `headers`，需要同一会话时显式传 Cookie/Authorization。
+- `content_diff_same_size` 是**弱信号**：CSRF token、时间戳、随机串都会导致内容差异；必须看 preview
+  并换方法/身份复测。**diff 不是漏洞**，确认可复现后才 `report_finding`。
+- 不自动写 fact/finding；工具只提供基线/变体证据与信号。
+
+worker 的代码固定工具纪律已要求：单请求 HTTP 侦察优先 `recon_http`，基线对比优先 `http_diff`，
+不要手搓 curl/Go/Python HTTP 客户端；只有文件上传、流式响应、特殊协议等工具无法表达的场景才允许
+手写最小脚本，并先在 fact 里说明原因。
+
+两个工具同样在启动时 seed 进 `tools` 表并默认绑定 `worker`，**重启 ARTEX 后生效**，无需 SQL 迁移。
 
 ---
 

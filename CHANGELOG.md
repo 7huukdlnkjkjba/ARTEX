@@ -44,6 +44,13 @@
 
 ### 新增的功能
 
+- **HTTP 黑盒工具 `recon_http` / `http_diff`**：`recon_http` 用 Go 进程内 HTTP 客户端做单请求侦察
+  （状态码/多值响应头/4KB 预览/长度/重定向链/超时/错误分类），复用 worker 的任务 MITM、任务隧道
+  SOCKS5 或全局代理，默认不跟随重定向、每跳校验 scope；`http_diff` 对同一 URL 模板做基线 vs 变体
+  差分，强制同一主机、去重且最多 20 个变体、总超时预算，输出 `status_flip`/`status_diff`/
+  `len_diff`/`content_diff` 等信号与相似度、预览、body hash。两者都只给证据与信号，不自动写
+  fact/finding；`toolchainRule` 增加 HTTP 侦察硬约束：单请求优先 `recon_http`、基线对比优先
+  `http_diff`，不要手搓 curl/Go/Python HTTP 客户端。默认绑定 worker，启动时 seed 进 tools 表。
 - **AD Kerberoast 与 RustScan worker 工具**：新增 `ad_kerberoast`（T1558.003）——默认只枚举 SPN，
   `target_user` 定向请求 TGS，`request_all` 显式全量；支持 `credential_id`/自动域凭据/显式凭据、
   scope、dry_run、RC4+AES `$krb5tgs$` 解析、finding/fact 回写与可执行错误分类。新增

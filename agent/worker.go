@@ -524,6 +524,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 期 3b:本任务有独立 MITM 实例时用它的地址+CA(上游=任务隧道 socks);
 	// 否则回落全局记录代理/全局出口代理。
 	proxyAddr, proxyCA := w.proxyForTask(taskID)
+	// In-process HTTP tools (recon_http/http_diff) must use the same egress path
+	// as Bash: the task MITM records their traffic, and a task-tunnel SOCKS5 is
+	// honored instead of silently dialing the target directly.
+	tsx.SetHTTPProxy(proxyAddr, proxyCA)
+	// Keep in-process recon HTTP requests on the same stable client UA as Bash.
+	tsx.SetHTTPUserAgent(w.uaForTask(taskID))
 	// The run-wide intent is not the current tool action. Do not forward it or
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})

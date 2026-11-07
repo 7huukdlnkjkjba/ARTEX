@@ -730,6 +730,9 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// 侦察：RustScan 全端口扫描（T1046）。只执行/解析/回写 fact，端口→服务与
 		// 下一步由模型决定；端口开放本身不写 finding。
 		t.toolRustscan(),
+		// HTTP 黑盒：单请求侦察 + 基线/变体差分。复用任务代理/录制，执行归代码，
+		// 判断归模型；不自动写 fact/finding。
+		t.toolReconHTTP(), t.toolHTTPDiff(),
 		// 以下工具【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / node_detail / list_companies /
 		// 跨 work 检索 search_all_worker_traces / list_worker_traces / get_worker_trace。
