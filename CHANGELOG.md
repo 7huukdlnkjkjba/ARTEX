@@ -42,6 +42,17 @@
   写完意图后会走 `reviveTask` 复活任务（与 set_goals 同一条 admission 路径），
   不再需要人工点「继续」。
 
+### 新增的功能
+
+- **WAF 绕过预筛接口**：新增 `POST /api/waf-probe`（`server/waf_bypass_probe.go`）。先对目标发
+  基线请求，从响应头/体识别 Cloudflare / Sucuri / Akamai / AWS ELB / ModSecurity / Imperva /
+  Barracuda / Fortinet 等 WAF；再把同一条 SQL 注入意图用 8 种编码/变形（明文、注释混淆、
+  大小写、双重 URL 编码、Unicode 引号、MySQL 版本注释、换行、Tab）逐条重放，按状态码与拦截页
+  判定哪些变体放行，返回 `verdict`（bypassable/hard/skip）、`score`（0-100）、`bypass_method`
+  与逐条 `evidence`。接口在 JWT 之后，仅操作者手动触发，不进入 agent 工具面；单请求超时默认
+  20s、上限 60s，404 不计为绕过。附单元测试覆盖 URL 归一化、WAF 识别、拦截判定与
+  bypassable/hard/skip 三种结论。
+
 ## [0.3.19] - 2026-10-31
 
 ### Exploit Author 与 Vuln Hunter

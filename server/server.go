@@ -1051,6 +1051,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/credentials", s.intranetListCredentials)
 	mux.HandleFunc("GET /api/intranet/topology", s.intranetTopology)
 
+	// WAF 绕过预筛（人工）:识别 WAF + 同一注入意图的 8 种编码变体实测,
+	// 返回 bypassable/hard/skip、评分与证据链。JWT 之后,仅操作者手动触发。
+	mux.HandleFunc("POST /api/waf-probe", s.wafBypassProbe)
+
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
 	// frontend (public — auth is enforced client-side and on the API). With the
 	// no-embed build the webui handler just 404s (run `next dev` separately).

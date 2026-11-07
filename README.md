@@ -18,10 +18,12 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.17** | 并入artex-ymh能力「外网突破 → 立足点 → 内网纵深」：webshell 会话、penelope 反弹、`session_recon`、suo5/chisel 隧道、内网拓扑、凭据库、待授权网段、任务移交、伪装门控、一键放行、RoE 三态、蜜罐识别、chains 技能、`artex doctor` |
 | **v0.3.18** | Metasploit **全自动闭环**（**端到端已验证 2026-10-27**）：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、确认后自动派单、会话自动取证并写回 fact；闭环依赖**自动安装**（首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`，可关、可指定解释器） |
 | **v0.3.19** | **Exploit Author + Vuln Hunter**：Metasploit 无确定性路径的确认漏洞自动转交 `exploit_author` 意图，用 `exploit_init/write/run/verify/abandon` 写出并验证真实 exp；新增 `vulnhunt` 意图与 `vulnhunt_init/build/fuzz/triage/report` 工具，对本地仓库/二进制做 fuzzing、按 sanitizer 栈去重并提升为 finding|
+| **v0.3.20** | **WAF 绕过预筛**：新增人工接口 `POST /api/waf-probe`，先识别 WAF 指纹，再把同一条 SQL 注入意图用 8 种编码/变形重放，返回 `bypassable`/`hard`/`skip`、0-100 评分与逐条证据（`server/waf_bypass_probe.go`） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
 - Exploit Author / Vuln Hunter：见下文「Exploit Author 与 Vuln Hunter（0.3.19）」
+- WAF 绕过预筛（`POST /api/waf-probe`）：见下文「WAF 绕过预筛（0.3.20）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -237,6 +239,34 @@ finding_id）。run 状态流转 `clone → building → fuzzing → triaging �
   `runSpecialIntent`，派单在 `server/msf_runtime.go` 的 `kickExploitAuthor`。
 - **工具发现**：这两组工具不 seed 进 `tools` 表、不参与 per-agent 绑定，只注入到对应 action 的
   专用 worker；避免通用 worker 误用 `exploit_run`/`vulnhunt_*` 这类高风险工具。
+
+---
+
+## WAF 绕过预筛（0.3.20）
+
+新增人工接口 `POST /api/waf-probe`（JWT 之后，仅操作者手动触发，不进入 agent 工具面）：先发一条
+基线请求识别 WAF 指纹，再把**同一条 SQL 注入意图**用 8 种编码/变形逐条重放，逐条判定
+「被拦截 / 放行 / 状态码变化」，输出结论与证据链。适合在正式打点前快速判断目标 WAF 类型与绕过成本。
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/waf-probe \
+  -H "Authorization: Bearer $ARTEX_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"target":"https://example.com/item?id=1","timeout_seconds":20}'
+```
+
+响应字段：
+
+| 字段 | 含义 |
+|---|---|
+| `waf_detected` | 从基线响应头/体识别的 WAF（cloudflare / sucuri / akamai / cdn / aws-elb / modsecurity / imperva / barracuda / fortinet / generic-waf），空=未识别 |
+| `verdict` | `bypassable`（至少一种变体穿过）/ `hard`（识别到 WAF 且变体全被拦）/ `skip`（无 WAF 且变体无变化，或目标不可达） |
+| `bypassable` / `bypass_method` | 是否可穿，以及穿过变体的名称、策略、状态码 |
+| `score` | 0-100，越高越值得打：可穿 `50+10×变体数`（封顶 100）、识别到 WAF 但全拦 10、无结论 20 |
+| `evidence` | 每个变体的逐条证据（明文 / 注释混淆 / 大小写 / 双重 URL 编码 / Unicode 引号 / MySQL 版本注释 / 换行 / Tab） |
+
+实现：`server/waf_bypass_probe.go`。`timeout_seconds` 是**单请求**超时（默认 20s、上限 60s），
+1 条基线 + 8 条变体串行发送，最坏耗时约 `9 × timeout`。404 不计为绕过（视为端点不存在）；
+TLS 校验关闭以兼容自签名靶场。本接口只做「预筛」，真正利用仍应走 guard / RoE / scope 约束。
 
 ---
 
