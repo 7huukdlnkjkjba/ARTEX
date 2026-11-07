@@ -68,6 +68,9 @@ func TestDetectWAFFromResponse(t *testing.T) {
 	if got := detectWAFFromResponse("HTTP/1.1 403 Forbidden\n", "request blocked by mod_security"); got != "modsecurity" {
 		t.Errorf("body detection = %q, want modsecurity", got)
 	}
+	if got := detectWAFFromResponse("HTTP/1.1 200 OK\nCf-Ray: abc\nX-Cdn: foo\n", "ok"); got != "cloudflare" {
+		t.Errorf("priority detection = %q, want cloudflare over generic-cdn", got)
+	}
 	if got := detectWAFFromResponse("HTTP/1.1 200 OK\nServer: nginx\n", "hello"); got != "" {
 		t.Errorf("no-WAF detection = %q, want empty", got)
 	}

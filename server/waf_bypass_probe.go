@@ -233,35 +233,37 @@ func isWAFBlocked(status int, body string, wafName string) bool {
 }
 
 // detectWAFFromResponse 从响应头/体识别 WAF。
+// 用有序切片而不是 map：同一响应可能命中多个特征（如 cf-ray + x-cdn），
+// 固定「具体指纹优先、泛 CDN 兜底」的顺序，保证多次探测结果稳定。
 func detectWAFFromResponse(rawHeaders, body string) string {
 	rawLower := strings.ToLower(rawHeaders)
-	// 头部特征
-	headerSigs := map[string]string{
-		"cf-ray":         "cloudflare",
-		"x-sucuri-id":    "sucuri",
-		"x-akamai":       "akamai",
-		"x-cdn":          "generic-cdn",
-		"server: awselb": "aws-elb",
+	// 头部特征（具体 → 泛化）
+	headerSigs := []struct{ sig, name string }{
+		{"cf-ray", "cloudflare"},
+		{"x-sucuri-id", "sucuri"},
+		{"x-akamai", "akamai"},
+		{"server: awselb", "aws-elb"},
+		{"x-cdn", "generic-cdn"},
 	}
-	for sig, name := range headerSigs {
-		if strings.Contains(rawLower, sig) {
-			return name
+	for _, h := range headerSigs {
+		if strings.Contains(rawLower, h.sig) {
+			return h.name
 		}
 	}
-	// 体特征
-	bodySigs := map[string]string{
-		"cloudflare":    "cloudflare",
-		"sucuri":        "sucuri",
-		"mod_security":  "modsecurity",
-		"incapsula":     "imperva",
-		"barracuda":     "barracuda",
-		"fortiweb":      "fortinet",
-		"请求被拦截":         "generic-waf",
-		"access denied": "generic-waf",
+	// 体特征（具体 → 泛化）
+	bodySigs := []struct{ sig, name string }{
+		{"cloudflare", "cloudflare"},
+		{"sucuri", "sucuri"},
+		{"mod_security", "modsecurity"},
+		{"incapsula", "imperva"},
+		{"barracuda", "barracuda"},
+		{"fortiweb", "fortinet"},
+		{"请求被拦截", "generic-waf"},
+		{"access denied", "generic-waf"},
 	}
-	for sig, name := range bodySigs {
-		if strings.Contains(body, sig) {
-			return name
+	for _, b := range bodySigs {
+		if strings.Contains(body, b.sig) {
+			return b.name
 		}
 	}
 	return ""
