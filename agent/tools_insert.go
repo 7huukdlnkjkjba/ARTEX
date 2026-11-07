@@ -724,6 +724,12 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// asset management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
 		t.insertAssets(), t.listAssets(),
+		// AD 攻击面：Kerberoast（T1558.003）。默认只枚举 SPN，指定 target_user 才请求
+		// TGS；凭据由 server 注入的 CredentialSource 解析，secret 不经过模型。
+		t.kerberoast(),
+		// 侦察：RustScan 全端口扫描（T1046）。只执行/解析/回写 fact，端口→服务与
+		// 下一步由模型决定；端口开放本身不写 finding。
+		t.toolRustscan(),
 		// 以下工具【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / node_detail / list_companies /
 		// 跨 work 检索 search_all_worker_traces / list_worker_traces / get_worker_trace。

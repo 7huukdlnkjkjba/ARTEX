@@ -44,6 +44,13 @@
 
 ### 新增的功能
 
+- **AD Kerberoast 与 RustScan worker 工具**：新增 `ad_kerberoast`（T1558.003）——默认只枚举 SPN，
+  `target_user` 定向请求 TGS，`request_all` 显式全量；支持 `credential_id`/自动域凭据/显式凭据、
+  scope、dry_run、RC4+AES `$krb5tgs$` 解析、finding/fact 回写与可执行错误分类。新增
+  `scan_rustscan`（T1046）——RustScan TCP 端口扫描，解析默认/greppable/Nmap 风格输出，去重排序，
+  CIDR 过大保护与 scope 校验，只回写 fact（端口开放不是漏洞）。`toolchainRule` 增加端口扫描硬约束：
+  全端口/端口段扫描必须走 `scan_rustscan`，执行归代码、决策归 AI。两个工具默认绑定 worker，
+  启动时 seed 进 tools 表。
 - **WAF 绕过预筛接口**：新增 `POST /api/waf-probe`（`server/waf_bypass_probe.go`）。先对目标发
   基线请求，从响应头/体识别 Cloudflare / Sucuri / Akamai / AWS ELB / ModSecurity / Imperva /
   Barracuda / Fortinet 等 WAF；再把同一条 SQL 注入意图用 8 种编码/变形（明文、注释混淆、

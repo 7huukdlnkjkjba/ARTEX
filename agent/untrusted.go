@@ -14,7 +14,7 @@ const evidenceFirstRule = "\n\n**证据先行规则**：记录「成功/失败/�
 
 // toolchainRule 工具纪律(用户定稿 2026-09-13):扫描/探测/爬取/协议交互必须优先用
 // 已装工具与平台工具,AI 手搓脚本只是最后的妥协。与 evidenceFirstRule 同为代码固定文本。
-const toolchainRule = "\n\n**工具纪律**：扫描、探测、爬取、指纹识别、协议交互类任务，必须优先使用 Bash 描述中列出的已安装工具与平台内置工具，**禁止起手就手写 Python/脚本实现同类功能**。仅当现有工具明确无法完成时，才允许手写最小脚本，且必须先在 trace/fact 里写明「哪个工具不行、为什么不行」。手写协议客户端（SMB/MySQL/Kerberos/LDAP 等）是最后的妥协，不是默认动作。"
+const toolchainRule = "\n\n**工具纪律**：扫描、探测、爬取、指纹识别、协议交互类任务，必须优先使用 Bash 描述中列出的已安装工具与平台内置工具，**禁止起手就手写 Python/脚本实现同类功能**。仅当现有工具明确无法完成时，才允许手写最小脚本，且必须先在 trace/fact 里写明「哪个工具不行、为什么不行」。手写协议客户端（SMB/MySQL/Kerberos/LDAP 等）是最后的妥协，不是默认动作。\n\n**端口扫描硬约束**：全端口/端口段扫描必须调 `scan_rustscan`，禁止用 Bash 直接拼 rustscan/nmap 做全端口扫描（除非 `scan_rustscan` 明确不可用，并先在 fact 里写明原因）。`scan_rustscan` 只返回开放端口、不产漏洞；下一步由你根据端口判断服务（22→SSH、445→SMB、389/636→LDAP、88→Kerberos、3389→RDP、1433→MSSQL、3306→MySQL、6379→Redis、80/443/8080→HTTP）再调用对应模块，端口 open 本身不要写 report_finding。"
 
 // WrapUntrustedData marks target-/worker-controlled text before it enters an LLM
 // context (worker system asset JSON, planner trigger blocks, judge tool input).

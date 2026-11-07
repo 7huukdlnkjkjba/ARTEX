@@ -54,11 +54,15 @@ type WebSearchOpts struct {
 
 type Worker struct {
 	findingRecorder FindingRecorder
-	prov            llm.Provider
-	model           string
-	workDir         string
-	proxyAddr       string
-	proxyCACert     string // recording proxy's CA cert path (for WebFetch HTTPS verify)
+	// credSource is wired by the server so tools such as ad_kerberoast can use a
+	// registered task credential without the secret ever passing through the model.
+	// nil = no credential store available.
+	credSource  CredentialSource
+	prov        llm.Provider
+	model       string
+	workDir     string
+	proxyAddr   string
+	proxyCACert string // recording proxy's CA cert path (for WebFetch HTTPS verify)
 	// taskProxyFn, when set, resolves the task's own MITM instance (期 3b 按任务
 	// 绑定上游:任务 MITM → 任务隧道 socks → 内网). Called per run with the task
 	// id; empty addr = fall back to proxyAddr/proxyCACert.
@@ -482,6 +486,7 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
+	tsx.SetCredentialSource(w.credSource)
 	tsx.SetTaskID(taskID)
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)

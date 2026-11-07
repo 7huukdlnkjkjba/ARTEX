@@ -574,6 +574,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	window := workerRuntime.CompactionWindow()
 	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
 	wk.SetFindingRecorder(s.evidenceStore())
+	// ad_kerberoast 等域工具通过它解析任务凭据；secret 只在 Go 侧拼进子进程参数，
+	// 不进工具入参/返回/activity。credStore 未初始化时保持 nil 接口（工具退回显式凭据）。
+	if s.credStore != nil {
+		wk.SetCredentialSource(s.credStore)
+	}
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
 	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile

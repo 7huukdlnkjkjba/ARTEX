@@ -59,11 +59,15 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
 	findingRecorder FindingRecorder
-	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
-	cs              *db.CompanyStore // company store (optional)
-	ts              *db.ExplorationStore
-	worker          string
-	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	// credSource resolves task-scoped credentials for tools that must authenticate
+	// to a target (currently ad_kerberoast). nil = no credential store wired: the
+	// tool then only accepts explicitly-passed username/password/hash.
+	credSource CredentialSource
+	as         *db.AssetStore   // asset store (optional; nil = asset tools not available)
+	cs         *db.CompanyStore // company store (optional)
+	ts         *db.ExplorationStore
+	worker     string
+	taskID     int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the

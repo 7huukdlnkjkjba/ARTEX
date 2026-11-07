@@ -19,11 +19,13 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.18** | Metasploit **全自动闭环**（**端到端已验证 2026-10-27**）：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、确认后自动派单、会话自动取证并写回 fact；闭环依赖**自动安装**（首次启动检测不到 `mcp-pymetasploit3` 时自动 `pip install`，可关、可指定解释器） |
 | **v0.3.19** | **Exploit Author + Vuln Hunter**：Metasploit 无确定性路径的确认漏洞自动转交 `exploit_author` 意图，用 `exploit_init/write/run/verify/abandon` 写出并验证真实 exp；新增 `vulnhunt` 意图与 `vulnhunt_init/build/fuzz/triage/report` 工具，对本地仓库/二进制做 fuzzing、按 sanitizer 栈去重并提升为 finding|
 | **v0.3.20** | **WAF 绕过预筛**：新增人工接口 `POST /api/waf-probe`，先识别 WAF 指纹，再把同一条 SQL 注入意图用 8 种编码/变形重放，返回 `bypassable`/`hard`/`skip`、0-100 评分与逐条证据（`server/waf_bypass_probe.go`） |
+| **v0.3.21** | **AD 与侦察工具化**：新增 worker 工具 `ad_kerberoast`（Kerberoasting：枚举/定向 TGS、RC4+AES 哈希解析、凭据库/scope/dry-run、finding/fact 回写）与 `scan_rustscan`（RustScan TCP 全端口扫描：结构化开放端口、CIDR 保护、scope、fact 回写）；端口扫描强制走 `scan_rustscan`，执行归代码、决策归 AI |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
 - Exploit Author / Vuln Hunter：见下文「Exploit Author 与 Vuln Hunter（0.3.19）」
 - WAF 绕过预筛（`POST /api/waf-probe`）：见下文「WAF 绕过预筛（0.3.20）」
+- AD 与端口扫描工具（`ad_kerberoast` / `scan_rustscan`）：见下文「AD 与端口扫描工具（0.3.21）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -267,6 +269,43 @@ curl -s -X POST http://127.0.0.1:8787/api/waf-probe \
 实现：`server/waf_bypass_probe.go`。`timeout_seconds` 是**单请求**超时（默认 20s、上限 60s），
 1 条基线 + 8 条变体串行发送，最坏耗时约 `9 × timeout`。404 不计为绕过（视为端点不存在）；
 TLS 校验关闭以兼容自签名靶场。本接口只做「预筛」，真正利用仍应走 guard / RoE / scope 约束。
+
+---
+
+## AD 与端口扫描工具（0.3.21）
+
+两个工具都默认绑定 worker，遵循「**执行归代码，决策归 AI**」：代码只做参数校验、scope、依赖发现、
+进程执行、输出解析、去重排序与图谱回写；**端口→服务的判断、漏洞判定、下一步打哪个模块由模型决定**。
+
+### `ad_kerberoast`（MITRE T1558.003）
+
+对域控做 Kerberoasting：枚举带 SPN 的服务账户，按 `target_user` 定向请求 TGS，返回可离线爆破的
+`$krb5tgs$` 哈希（hashcat 13100 RC4 / 19700 AES）。
+
+- **默认只枚举**（LDAP，低噪声、不产生 4769）；`target_user=<账号>` 才请求单账户 TGS；`request_all=true`
+  才对全部候选请求（每个账户一条 4769，高噪声，非必要不用）。
+- **凭据优先用平台凭据库**：`credential_id`（先 `list_credentials` 查）或自动选本任务中域匹配的
+  `password`/`hash_nt` 凭据；也兼容显式 `username+password/hash`。secret 不会出现在工具返回里。
+- 命中哈希回写 finding（evidence 含完整哈希与 hashcat 命令）；只枚举/未命中回写 fact + `next_steps`。
+- 前提：DC 88/TCP 与 LDAP(389/636) 可达、操作机与 DC 时钟偏差 ≤5 分钟、已装 impacket
+  （`GetUserSPNs.py` 在 PATH，或与 python 同环境的 Scripts 目录）。
+
+### `scan_rustscan`（MITRE T1046）
+
+用 RustScan 快速扫描目标 TCP 端口（默认 1-65535），返回结构化 `open_ports`（去重、排序）并回写 fact。
+
+- 支持 IP / 域名 / CIDR；URL 或 `host:port` 会自动拆成 host+port。
+- 默认拒绝大于 `/16` 的 CIDR，需要时显式 `allow_large_range=true`；`dry_run=true` 只解析目标与校验依赖。
+- **端口开放本身不是漏洞**：工具只写 fact，不写 finding；下一步由模型按端口判断服务
+  （22→SSH、445→SMB、389/636→LDAP、88→Kerberos、3389→RDP、1433→MSSQL、3306→MySQL、6379→Redis、
+  80/443/8080→HTTP）再调用对应模块。
+- 依赖：`rustscan` 在 PATH、`data/tools/rustscan[.exe]`，或 `ARTEX_RUSTSCAN_PATH` 指向二进制。
+  安装：`cargo install rustscan` 或从 GitHub release 下载。
+- worker 的代码固定工具纪律已要求：全端口/端口段扫描必须走 `scan_rustscan`，不要用 Bash 直接拼
+  rustscan/nmap 做全端口扫描。
+
+两个工具都会在启动时由 `BuiltinToolSeeds()` seed 进 `tools` 表并默认绑定 `worker`；**重启 ARTEX 后生效**，
+无需 SQL 迁移。目标在隔离内网时，先从立足点建隧道/会话，本工具默认从 ARTEX 宿主发起。
 
 ---
 
