@@ -23,7 +23,8 @@ rem    --help          show this help
 rem
 rem  Notes:
 rem    - Typed changes are staged: tracked modifications, README.md,
-rem      CHANGELOG.md, plus new *.go / *.bat files.
+rem      CHANGELOG.md, plus new agent/*.go and server/*.go files.
+rem      Other untracked files are left alone unless --all is used.
 rem    - Untracked binaries, .gocache, .gotmp are NOT staged unless --all.
 rem    - A failed push keeps the local commit; re-run `git push -u origin <branch>`.
 rem ============================================================
@@ -171,7 +172,8 @@ echo [3/4] staging changes
 git add -u
 if exist "%REPO%\README.md" git add -- "%REPO%\README.md"
 if exist "%REPO%\CHANGELOG.md" git add -- "%REPO%\CHANGELOG.md"
-git add -- "*.go" "*.bat" 2>nul
+git add -- "agent/*.go" "server/*.go" 2>nul
+if exist "%REPO%\agent\build.bat" git add -- "%REPO%\agent\build.bat"
 if "%STAGE_ALL%"=="1" (
   echo [warn] --all: staging every untracked file, including binaries/caches
   git add -A
@@ -227,7 +229,8 @@ echo   --help          show this help
 echo.
 echo Default commit message: chore: build %%DATE%% %%TIME%%
 echo Default staged set: tracked modifications + README.md + CHANGELOG.md
-echo                     + new *.go / *.bat files.
+echo                     + new agent/*.go, server/*.go, agent/build.bat.
+echo Other untracked files are not staged unless --all is used.
 popd
 endlocal
 exit /b 0
