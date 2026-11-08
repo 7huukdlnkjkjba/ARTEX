@@ -72,6 +72,11 @@ type ToolSet struct {
 	// httpUA is the task's stable client User-Agent (Batch 5 B4), so in-process
 	// recon requests look consistent with Bash/curl requests in the same task.
 	httpUA string
+	// ledger is this intent run's observation receipt ledger. Tools that can
+	// support a finding (path_probe/admin_surface/fingerprint/auth_probe) record
+	// each complete HTTP observation here; report_finding_gated refuses URLs /
+	// observation IDs that are not present and complete.
+	ledger *ReceiptLedger
 	as     *db.AssetStore   // asset store (optional; nil = asset tools not available)
 	cs     *db.CompanyStore // company store (optional)
 	ts     *db.ExplorationStore

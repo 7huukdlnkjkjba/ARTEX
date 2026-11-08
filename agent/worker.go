@@ -521,6 +521,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// worker 有。仅【全局态势 overview】留在启动 user 消息里——它可降级、容忍 stale，压掉无碍。
 	// 本次意图的专属工作目录 <workDir>/tasks/<taskID>/i<intentID>，引擎侧先建好。
 	runDir := ensureRunDir(w.workDir, taskID, intent.ID)
+	// Per-intent observation ledger: path_probe/admin_surface/fingerprint/
+	// auth_probe write receipts here; report_finding_gated verifies against it.
+	// Keeping it per intent avoids concurrent workers overwriting one task file;
+	// cross-intent evidence should be re-observed in the current intent.
+	tsx.SetReceiptLedger(runDir, fmt.Sprintf("task-%d-intent-%d", taskID, intent.ID))
 	// 期 3b:本任务有独立 MITM 实例时用它的地址+CA(上游=任务隧道 socks);
 	// 否则回落全局记录代理/全局出口代理。
 	proxyAddr, proxyCA := w.proxyForTask(taskID)

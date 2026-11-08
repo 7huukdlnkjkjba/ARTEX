@@ -44,6 +44,15 @@
 
 ### 新增的功能
 
+- **证据核心：观察台账 + 闸门 finding**：新增 `path_probe`（敏感路径 + 3 次随机路径 soft-404 校准）、
+  `admin_surface`（Spring Actuator/Swagger/Druid/Nacos/Eureka/Jenkins/Tomcat/ES/K8s/metrics 等 19 类
+  产品内容正则）、`fingerprint`（WAF/CDN 指纹 + 安全响应头审计）、`auth_probe`（anonymous/
+  authRequired/ambiguous + edge_blocked）四个探测工具；每条完整探测写入 per-intent
+  `observation_ledger.json`（receipt_id、request/response SHA-256、状态、完整性）。新增
+  `report_finding_gated`：必须带非 unproven 的 `proof_kind` + 本意图 `observation_ids`，引用的每个
+  URL 必须在台账且完整、与 observation URL 匹配、response_hash 一致，否则整条拒绝；通过后复用
+  findingRecorder/合并/资产锚定/planner 通知。`toolchainRule` 增加证据闸门硬约束。默认绑定 worker，
+  启动时 seed 进 tools 表。
 - **HTTP 黑盒工具 `recon_http` / `http_diff`**：`recon_http` 用 Go 进程内 HTTP 客户端做单请求侦察
   （状态码/多值响应头/4KB 预览/长度/重定向链/超时/错误分类），复用 worker 的任务 MITM、任务隧道
   SOCKS5 或全局代理，默认不跟随重定向、每跳校验 scope；`http_diff` 对同一 URL 模板做基线 vs 变体

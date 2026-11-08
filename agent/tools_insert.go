@@ -733,6 +733,10 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// HTTP 黑盒：单请求侦察 + 基线/变体差分。复用任务代理/录制，执行归代码，
 		// 判断归模型；不自动写 fact/finding。
 		t.toolReconHTTP(), t.toolHTTPDiff(),
+		// 证据核心：观察台账 + 证明等级 + 闸门式 finding。路径/管理面/指纹/鉴权
+		// 探测都会写 receipt；report_finding_gated 只接受台账内、完整、可对上的证据。
+		t.toolPathProbe(), t.toolAdminSurface(), t.toolFingerprint(), t.toolAuthProbe(),
+		t.toolReportFindingGated(),
 		// 以下工具【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / node_detail / list_companies /
 		// 跨 work 检索 search_all_worker_traces / list_worker_traces / get_worker_trace。

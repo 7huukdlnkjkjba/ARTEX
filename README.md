@@ -21,6 +21,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.20** | **WAF 绕过预筛**：新增人工接口 `POST /api/waf-probe`，先识别 WAF 指纹，再把同一条 SQL 注入意图用 8 种编码/变形重放，返回 `bypassable`/`hard`/`skip`、0-100 评分与逐条证据（`server/waf_bypass_probe.go`） |
 | **v0.3.21** | **AD 与侦察工具化**：新增 worker 工具 `ad_kerberoast`（Kerberoasting：枚举/定向 TGS、RC4+AES 哈希解析、凭据库/scope/dry-run、finding/fact 回写）与 `scan_rustscan`（RustScan TCP 全端口扫描：结构化开放端口、CIDR 保护、scope、fact 回写）；端口扫描强制走 `scan_rustscan`，执行归代码、决策归 AI |
 | **v0.3.22** | **HTTP 黑盒工具化**：新增 worker 工具 `recon_http`（单请求侦察：状态/头/体预览/重定向/超时/错误分类，走任务代理与录制）与 `http_diff`（基线 vs 变体：状态翻转/长度/内容相似度信号，支持 IDOR/越权/注入/认证差异）；HTTP 侦察优先走工具，执行归代码、决策归 AI |
+| **v0.3.23** | **证据核心（观察台账 + 闸门 finding）**：新增 `path_probe` / `admin_surface` / `fingerprint` / `auth_probe`，所有探测写入 per-intent `observation_ledger.json`（receipt_id + request/response hash + 完整性）；新增 `report_finding_gated`，只接受台账内、URL 匹配、response_hash 一致的证据，阻止凭印象/版本猜测写 finding |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -28,6 +29,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - WAF 绕过预筛（`POST /api/waf-probe`）：见下文「WAF 绕过预筛（0.3.20）」
 - AD 与端口扫描工具（`ad_kerberoast` / `scan_rustscan`）：见下文「AD 与端口扫描工具（0.3.21）」
 - HTTP 黑盒侦察与差分（`recon_http` / `http_diff`）：见下文「HTTP 黑盒侦察与差分（0.3.22）」
+- 证据核心（观察台账 / `report_finding_gated`）：见下文「证据核心：观察台账与闸门 finding（0.3.23）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -349,6 +351,36 @@ worker 的代码固定工具纪律已要求：单请求 HTTP 侦察优先 `recon
 手写最小脚本，并先在 fact 里说明原因。
 
 两个工具同样在启动时 seed 进 `tools` 表并默认绑定 `worker`，**重启 ARTEX 后生效**，无需 SQL 迁移。
+
+---
+
+## 证据核心：观察台账与闸门 finding（0.3.23）
+
+这一层把“模型说发现了漏洞”变成“有可核对的 HTTP 观察记录”：
+
+- 每个 worker 意图在自己的工作目录写 `observation_ledger.json`；
+- 每条完整探测记录 `receipt_id`、URL、方法、状态码、request hash、response hash、时间、是否完整；
+- `report_finding_gated` 只接受：`proof_kind` 非 `unproven`、`observation_ids` 指向本意图台账、citation URL 全部在台账且完整、observation 的 URL 与引用 URL 匹配、多条 observation 的 response hash 一致。
+
+### 探测工具
+
+| 工具 | 作用 |
+|---|---|
+| `path_probe` | 敏感路径探测；先做 3 次随机路径 soft-404 校准，过滤 404/410 与 soft-404 模板；返回命中路径 + 状态 + 字节数 + `receipt_id` |
+| `admin_surface` | 19 类框架管理面板（Spring Actuator、Swagger、Druid、Nacos、Eureka、Jenkins、Tomcat Manager、ES、K8s、metrics 等）；产品内容正则匹配才进 `found`，仅 2xx 无内容证据进 `candidates` |
+| `fingerprint` | WAF/CDN 指纹（Cloudflare/Akamai/Fastly/AWS/阿里云/腾讯云/百度云加速/安全狗/宝塔/七牛/ModSecurity 等）+ 安全响应头缺失审计 + `receipt_id` |
+| `auth_probe` | 端点鉴权三态 `anonymous` / `auth_required` / `ambiguous`；可选 Cookie 做认证对照；`edge_blocked` 检测“全 403/429 是边缘拦截而非端点鉴权” |
+
+这些工具都复用 `httpclient.go` 的任务 MITM / 任务隧道 SOCKS5 / 全局代理与稳定 UA，因此探测流量会进录制台账。
+
+### `report_finding_gated`
+
+- 必填：`proof_kind`（`reflection_observed` / `differential` / `content_hash_migration` / `identity_marker` / `server_state` / `oob_callback` 等，`unproven` 拒绝）、`observation_ids`、`summary`/`evidence`（必须含真实 URL）。
+- 闸门校验失败整条拒绝，并明确说明是“URL 不在台账 / 请求不完整 / URL 与 observation 不匹配 / response_hash 不一致”。
+- 通过后复用 `report_finding` 的写回链路（findingRecorder、合并、资产锚定、planner 通知）。
+- 台账是 **per-intent**：跨意图证据请在当前意图重新观察，或改用 `report_finding` 并在 evidence 说明原因（TCP/非 HTTP/工具外证据）。
+
+worker 的代码固定工具纪律已要求：HTTP/服务类确认漏洞优先走 `report_finding_gated`；闸门拒绝的 finding 不要换工具硬报。
 
 ---
 
