@@ -58,3 +58,12 @@ Thumbs.db
 /bench/
 /Dockerfile.bench
 /Dockerfile.bench.v2
+
+# 本地运行时/密钥/测试产物（绝不提交）
+/pentest-ai/runtime/
+/_cmp/
+/start-test.log
+/.gocache/
+/.gotmp/
+/*.exe
+/*.exe.bak-*
