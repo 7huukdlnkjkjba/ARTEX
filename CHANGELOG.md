@@ -14,6 +14,9 @@
   `DONT_REQ_PREAUTH` 账号；无凭据时用 `users` 列表走 `-usersfile ... -no-pass`。解析
   `$krb5asrep$`，按 etype 给出 hashcat 18200/19800/19900；命中回写 finding，无命中回写
   inferred fact；`dry_run` 只探测 88/LDAP 与 impacket 是否就绪。
+- **DCSync `ad_dcsync`（T1003.006）**：用已有域凭据经 `secretsdump.py -just-dc-user`
+  复制指定账号；强制 `confirm=true`，`target_user` 必填（通常 krbtgt），不提供 `-just-dc`
+  全量导出；返回 NT hash 但 finding evidence 不含哈希；`dry_run` 检查 445/135/389 与 impacket。
 
 ### 修改的功能
 

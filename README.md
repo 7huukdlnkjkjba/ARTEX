@@ -22,7 +22,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.21** | **AD 与侦察工具化**：新增 worker 工具 `ad_kerberoast`（Kerberoasting：枚举/定向 TGS、RC4+AES 哈希解析、凭据库/scope/dry-run、finding/fact 回写）与 `scan_rustscan`（RustScan TCP 全端口扫描：结构化开放端口、CIDR 保护、scope、fact 回写）；端口扫描强制走 `scan_rustscan`，执行归代码、决策归 AI |
 | **v0.3.22** | **HTTP 黑盒工具化**：新增 worker 工具 `recon_http`（单请求侦察：状态/头/体预览/重定向/超时/错误分类，走任务代理与录制）与 `http_diff`（基线 vs 变体：状态翻转/长度/内容相似度信号，支持 IDOR/越权/注入/认证差异）；HTTP 侦察优先走工具，执行归代码、决策归 AI |
 | **v0.3.23** | **证据核心（观察台账 + 闸门 finding）**：新增 `path_probe` / `admin_surface` / `fingerprint` / `auth_probe`，所有探测写入 per-intent `observation_ledger.json`（receipt_id + request/response hash + 完整性）；新增 `report_finding_gated`，只接受台账内、URL 匹配、response_hash 一致的证据，阻止凭印象/版本猜测写 finding |
-| **v0.3.24** | **内网原生协议 + AS-REP**：新增 `raw_tcp`（SMB2/LDAP/TDS/MySQL/raw hex 原生 TCP 探测，自动走任务隧道 SOCKS5，代码构造与指纹，不做认证/利用）与 `ad_asreproast`（T1558.004 AS-REP Roasting：有凭据枚举 / 无凭据 users 列表，hashcat 18200/19800/19900，finding/fact 回写） |
+| **v0.3.24** | **内网原生协议 + AS-REP + DCSync**：新增 `raw_tcp`（SMB2/LDAP/TDS/MySQL/raw hex 原生 TCP 探测，自动走任务隧道 SOCKS5，代码构造与指纹，不做认证/利用）、`ad_asreproast`（T1558.004 AS-REP Roasting）与 `ad_dcsync`（T1003.006，必须显式 confirm，哈希不写 finding evidence） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -31,7 +31,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - AD 与端口扫描工具（`ad_kerberoast` / `scan_rustscan`）：见下文「AD 与端口扫描工具（0.3.21）」
 - HTTP 黑盒侦察与差分（`recon_http` / `http_diff`）：见下文「HTTP 黑盒侦察与差分（0.3.22）」
 - 证据核心（观察台账 / `report_finding_gated`）：见下文「证据核心：观察台账与闸门 finding（0.3.23）」
-- 内网原生协议与 AS-REP（`raw_tcp` / `ad_asreproast`）：见下文「内网原生协议与 AS-REP（0.3.24）」
+- 内网原生协议与 AS-REP（`raw_tcp` / `ad_asreproast` / `ad_dcsync`）：见下文「内网原生协议与 AS-REP（0.3.24）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -386,7 +386,7 @@ worker 的代码固定工具纪律已要求：HTTP/服务类确认漏洞优先�
 
 ---
 
-## 内网原生协议与 AS-REP（0.3.24）
+## 内网原生协议、AS-REP 与 DCSync（0.3.24）
 
 这一版补的是“目标不出网、HTTP 工具够不到”的原生 TCP 面，以及 AD 凭据路径里缺失的 AS-REP：
 
@@ -421,16 +421,29 @@ tunnel_deploy / session_exec 确认可达
 - 命中回写 finding；无命中回写 inferred fact；`dry_run=true` 只探测 88/LDAP 与 `GetNPUsers.py` 是否就绪。
 - 前提：DC 88/TCP 与 LDAP(389/636) 可达、时钟偏差 ≤5 分钟、`python -m pip install impacket`。
 
+### `ad_dcsync`
+
+- MITRE **T1003.006**；用已有域凭据经 DRSUAPI 复制指定账号（`secretsdump.py -just-dc-user`）。
+- **必须显式 `confirm=true`**；`dry_run=true` 只检查 secretsdump 与 DC 445/135/389，不需要确认。
+- `target_user` 必填，通常 `krbtgt`；**不提供 `-just-dc` 全量导出**。
+- 返回 `hashes[]`（account/RID/LM/NT）；finding evidence **不含 NT hash**，只写账号/RID/“hash 在工具结果中，用 add_credential 落库”。
+- 需要复制权限（Domain Admin / Replicating Directory Changes）；普通域用户会 `rpc_s_access_denied`。
+- 前提：DC 445/135 可达、已装 impacket；`dry_run` 可先验证。
+
+> **可达性边界**：`raw_tcp` 会自动走任务隧道 SOCKS5；`ad_asreproast` / `ad_dcsync` 调用 impacket，仍从 ARTEX 宿主直连 DC。隔离内网需要把 impacket 放到跳板/会话侧执行，或后续给 impacket 接 proxychains/SOCKS5 wrapper；不要误以为它们也走了任务隧道。
+
 ### 本版未接入的高风险执行器
 
-`credential_spray`、`sqli_dump`、`upload_shell`、`ad_adcs_esc`、`ad_dcsync`、`lateral_move` **没有**按外部草案直接并入：
+`credential_spray`、`sqli_dump`、`upload_shell`、`ad_adcs_esc`、`lateral_move` **没有**按外部草案直接并入：
 
 - 凭据喷洒的 lockout 探测必须是真实实现，且默认 dry-run/人工确认；草案里的 `probeLockoutThreshold` 是返回 0 的占位，直接跑会锁账号。
 - SQLi dump 需要经过验证的布尔/时间 oracle；草案的 true/false 判定和 `s.fetchRaw` 不成立，直接落库会产出假数据。
-- ADCS/DCSync 属于高影响操作，需要 `certipy`/`secretsdump` 外部工具 + 显式确认 + 审计；不应作为 worker 默认工具。
+- ADCS 属于高影响枚举/利用，需要 `certipy` 外部工具 + 显式确认 + 审计；`ad_dcsync` 已单独实现并加 confirm 闸门。
 - `upload_shell` / `lateral_move` 已有 `exploit_author` / `session_exec` 通道，重复执行器会绕过现有 guard。
 
 这些能力在补齐“真实 lockout 策略读取 + dry-run 默认 + 显式 confirm + 证据回写”之前，继续走 `exploit_author` / `session_exec` / `msf_execute` 或人工外部工具。
+
+`raw_tcp` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
 
 ---
 

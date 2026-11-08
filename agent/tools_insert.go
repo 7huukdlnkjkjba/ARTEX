@@ -729,6 +729,8 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.kerberoast(),
 		// AD 攻击面：AS-REP Roasting（T1558.004）。有凭据可枚举，无凭据需 users 列表。
 		t.toolASREPRoast(),
+		// AD 攻击面：DCSync（T1003.006）。高影响，必须显式 confirm=true。
+		t.toolDCSync(),
 		// 侦察：RustScan 全端口扫描（T1046）。只执行/解析/回写 fact，端口→服务与
 		// 下一步由模型决定；端口开放本身不写 finding。
 		t.toolRustscan(),
