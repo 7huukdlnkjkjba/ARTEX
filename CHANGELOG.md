@@ -17,6 +17,11 @@
 - **DCSync `ad_dcsync`（T1003.006）**：用已有域凭据经 `secretsdump.py -just-dc-user`
   复制指定账号；强制 `confirm=true`，`target_user` 必填（通常 krbtgt），不提供 `-just-dc`
   全量导出；返回 NT hash 但 finding evidence 不含哈希；`dry_run` 检查 445/135/389 与 impacket。
+- **受控 `sqlmap_run`**：默认 level/risk 1、单线程、technique=BE；detect/dbs/current-user/
+  is-dba/dump；dump 必须 confirm=true 且指定 table；走任务 MITM；解析注入/DBMS/dbs 后回写 finding。
+- **受控 `nuclei_run`**：默认 critical/high/medium、限速 50、关 interactsh、JSONL 解析去重后回写 finding。
+- **`impacket_proxy`**：Linux/proxychains + 任务 SOCKS5，让 impacket 进隔离内网；无隧道返回
+  `no_tunnel`，Windows 返回 `tool_missing`；script 名白名单防路径穿越。
 
 ### 修改的功能
 

@@ -23,6 +23,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.22** | **HTTP 黑盒工具化**：新增 worker 工具 `recon_http`（单请求侦察：状态/头/体预览/重定向/超时/错误分类，走任务代理与录制）与 `http_diff`（基线 vs 变体：状态翻转/长度/内容相似度信号，支持 IDOR/越权/注入/认证差异）；HTTP 侦察优先走工具，执行归代码、决策归 AI |
 | **v0.3.23** | **证据核心（观察台账 + 闸门 finding）**：新增 `path_probe` / `admin_surface` / `fingerprint` / `auth_probe`，所有探测写入 per-intent `observation_ledger.json`（receipt_id + request/response hash + 完整性）；新增 `report_finding_gated`，只接受台账内、URL 匹配、response_hash 一致的证据，阻止凭印象/版本猜测写 finding |
 | **v0.3.24** | **内网原生协议 + AS-REP + DCSync**：新增 `raw_tcp`（SMB2/LDAP/TDS/MySQL/raw hex 原生 TCP 探测，自动走任务隧道 SOCKS5，代码构造与指纹，不做认证/利用）、`ad_asreproast`（T1558.004 AS-REP Roasting）与 `ad_dcsync`（T1003.006，必须显式 confirm，哈希不写 finding evidence） |
+| **v0.3.25** | **受控 Web 利用与 impacket 隧道**：新增 `sqlmap_run`（detect/dbs/current-user/is-dba/dump，dump 需 confirm+table）、`nuclei_run`（JSONL 解析、限速、关 interactsh）与 `impacket_proxy`（Linux/proxychains + 任务 SOCKS5，让 impacket 进隔离内网） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -32,6 +33,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - HTTP 黑盒侦察与差分（`recon_http` / `http_diff`）：见下文「HTTP 黑盒侦察与差分（0.3.22）」
 - 证据核心（观察台账 / `report_finding_gated`）：见下文「证据核心：观察台账与闸门 finding（0.3.23）」
 - 内网原生协议与 AS-REP（`raw_tcp` / `ad_asreproast` / `ad_dcsync`）：见下文「内网原生协议与 AS-REP（0.3.24）」
+- 受控 Web 利用与 impacket 隧道（`sqlmap_run` / `nuclei_run` / `impacket_proxy`）：见下文「受控 Web 利用与 impacket 隧道（0.3.25）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -430,7 +432,34 @@ tunnel_deploy / session_exec 确认可达
 - 需要复制权限（Domain Admin / Replicating Directory Changes）；普通域用户会 `rpc_s_access_denied`。
 - 前提：DC 445/135 可达、已装 impacket；`dry_run` 可先验证。
 
-> **可达性边界**：`raw_tcp` 会自动走任务隧道 SOCKS5；`ad_asreproast` / `ad_dcsync` 调用 impacket，仍从 ARTEX 宿主直连 DC。隔离内网需要把 impacket 放到跳板/会话侧执行，或后续给 impacket 接 proxychains/SOCKS5 wrapper；不要误以为它们也走了任务隧道。
+> **可达性边界**：`raw_tcp` 会自动走任务隧道 SOCKS5；`ad_asreproast` / `ad_dcsync` 调用 impacket，默认仍从 ARTEX 宿主直连。Linux 部署可用 `impacket_proxy`（proxychains + 任务 SOCKS5）把 impacket 带进隔离内网；Windows 没有 proxychains，仍需跳板/会话侧执行。
+
+---
+
+## 受控 Web 利用与 impacket 隧道（0.3.25）
+
+### `sqlmap_run`
+
+- 默认 `--batch --smart --level=1 --risk=1 --threads=1 --timeout=10 --retries=1 --technique=BE --flush-session`。
+- `action=detect|dbs|current-user|is-dba|dump`；`dump` 必须 `confirm=true` **且** 指定 `table`，禁止无范围整库导出。
+- 不提供 `--os-shell` / `--sql-shell` / `--file-write`。
+- 走任务 MITM（若开启）→ 目标，`egress=task_mitm|direct`；解析 `is vulnerable` / DBMS / current user / dbs，确认注入后回写 finding。
+- 工具缺失时返回 `tool_missing`，不伪造成功。
+
+### `nuclei_run`
+
+- 默认 `-severity critical,high,medium -rl 50 -timeout 10 -retries 1 -jsonl -silent -nc -or -ni -duc`。
+- `-ni` 关闭 interactsh（避免 OOB 外带）；需要 OAST 时人工评估后再开。
+- 支持 `tags` / `template` 缩小范围；走任务 MITM（若开启）。
+- JSONL 解析 `template-id` / `info.name` / `info.severity` / `matched-at`，去重后回写 finding。
+
+### `impacket_proxy`
+
+- 仅 **Linux + proxychains**；Windows 返回 `tool_missing`（不冒充直连成功）。
+- 用 `TaskSocks5ForTask` 取任务隧道 SOCKS5（不是 HTTP MITM），写临时 proxychains 配置，执行 impacket 脚本。
+- 无 alive 隧道返回 `no_tunnel`，不会静默直连。
+- `script` 只接受 impacket 脚本名（`GetNPUsers.py` / `secretsdump.py` / `findDelegation.py` 等），拒绝路径穿越；`args` 原样传给脚本。
+- 支持 `dry_run` 查看 script/python/proxychains/参数，不执行。
 
 ### 本版未接入的高风险执行器
 
@@ -443,7 +472,7 @@ tunnel_deploy / session_exec 确认可达
 
 这些能力在补齐“真实 lockout 策略读取 + dry-run 默认 + 显式 confirm + 证据回写”之前，继续走 `exploit_author` / `session_exec` / `msf_execute` 或人工外部工具。
 
-`raw_tcp` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
+`raw_tcp` / `sqlmap_run` / `nuclei_run` / `impacket_proxy` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
 
 ---
 
