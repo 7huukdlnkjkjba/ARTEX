@@ -4,7 +4,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 
 rem ============================================================
 rem  ARTEX reusable build + GitHub update script
-rem  Location: repo root build.bat (also works from agent\build.bat)
+rem  Location: repo root build.bat, or agent\build.bat
 rem  Run from anywhere; it auto-detects the repository root.
 rem
 rem  Usage:
@@ -31,8 +31,8 @@ rem    - A failed push keeps the local commit; re-run `git push -u origin <branc
 rem ============================================================
 
 rem ---------- locate repository root ----------
-rem Root build.bat: %~dp0 contains go.mod.
-rem agent\build.bat: go.mod is one level up.
+rem If go.mod is next to this script, that's the repo root.
+rem Otherwise assume the script lives in a subdir (e.g. agent\) and go up one level.
 if exist "%~dp0go.mod" (
   pushd "%~dp0" >nul 2>nul
 ) else (
@@ -248,7 +248,7 @@ echo   --help          show this help
 echo.
 echo Default commit message: chore: build %%DATE%% %%TIME%%
 echo Default staged set: tracked modifications + README.md + CHANGELOG.md
-echo                     + new agent/*.go, server/*.go, build.bat.
+echo                     + new agent/*.go, server/*.go, build.bat, agent\build.bat.
 echo Other untracked files are never staged; use git add explicitly.
 echo Sensitive paths (pentest-ai/runtime, secrets, .env/.key/.pem, .exe,
 echo pgdata, _cmp, start-test.log) are rejected.

@@ -727,6 +727,8 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// AD 攻击面：Kerberoast（T1558.003）。默认只枚举 SPN，指定 target_user 才请求
 		// TGS；凭据由 server 注入的 CredentialSource 解析，secret 不经过模型。
 		t.kerberoast(),
+		// AD 攻击面：AS-REP Roasting（T1558.004）。有凭据可枚举，无凭据需 users 列表。
+		t.toolASREPRoast(),
 		// 侦察：RustScan 全端口扫描（T1046）。只执行/解析/回写 fact，端口→服务与
 		// 下一步由模型决定；端口开放本身不写 finding。
 		t.toolRustscan(),

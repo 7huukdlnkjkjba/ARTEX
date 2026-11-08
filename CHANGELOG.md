@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### 新增的功能
+
+- **内网原生协议 `raw_tcp`**：SMB2 NEGOTIATE / LDAP 匿名 Bind / TDS PRELOGIN / MySQL 握手 /
+  任意 hex 的 TCP 探测；优先走任务隧道 SOCKS5（`TaskSocks5ForTask`），其次全局 SOCKS5，
+  最后直连；结果带 `egress`、`request_hex`/`response_hex`、SMB2/LDAP/TDS/MySQL 指纹。
+  只做协议探测，不做认证/爆破/利用；进任务 scope 校验；raw TCP 观察不进入 observation_ledger。
+- **AS-REP Roasting `ad_asreproast`（T1558.004）**：有域凭据时由 `GetNPUsers.py` 枚举
+  `DONT_REQ_PREAUTH` 账号；无凭据时用 `users` 列表走 `-usersfile ... -no-pass`。解析
+  `$krb5asrep$`，按 etype 给出 hashcat 18200/19800/19900；命中回写 finding，无命中回写
+  inferred fact；`dry_run` 只探测 88/LDAP 与 impacket 是否就绪。
+
 ### 修改的功能
 
 - **派单前端点评分与硬跳过**：`add_intent` 现在先按绑定资产做派发评分——带 ID 参数 /

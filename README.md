@@ -22,6 +22,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.21** | **AD 与侦察工具化**：新增 worker 工具 `ad_kerberoast`（Kerberoasting：枚举/定向 TGS、RC4+AES 哈希解析、凭据库/scope/dry-run、finding/fact 回写）与 `scan_rustscan`（RustScan TCP 全端口扫描：结构化开放端口、CIDR 保护、scope、fact 回写）；端口扫描强制走 `scan_rustscan`，执行归代码、决策归 AI |
 | **v0.3.22** | **HTTP 黑盒工具化**：新增 worker 工具 `recon_http`（单请求侦察：状态/头/体预览/重定向/超时/错误分类，走任务代理与录制）与 `http_diff`（基线 vs 变体：状态翻转/长度/内容相似度信号，支持 IDOR/越权/注入/认证差异）；HTTP 侦察优先走工具，执行归代码、决策归 AI |
 | **v0.3.23** | **证据核心（观察台账 + 闸门 finding）**：新增 `path_probe` / `admin_surface` / `fingerprint` / `auth_probe`，所有探测写入 per-intent `observation_ledger.json`（receipt_id + request/response hash + 完整性）；新增 `report_finding_gated`，只接受台账内、URL 匹配、response_hash 一致的证据，阻止凭印象/版本猜测写 finding |
+| **v0.3.24** | **内网原生协议 + AS-REP**：新增 `raw_tcp`（SMB2/LDAP/TDS/MySQL/raw hex 原生 TCP 探测，自动走任务隧道 SOCKS5，代码构造与指纹，不做认证/利用）与 `ad_asreproast`（T1558.004 AS-REP Roasting：有凭据枚举 / 无凭据 users 列表，hashcat 18200/19800/19900，finding/fact 回写） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -30,6 +31,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - AD 与端口扫描工具（`ad_kerberoast` / `scan_rustscan`）：见下文「AD 与端口扫描工具（0.3.21）」
 - HTTP 黑盒侦察与差分（`recon_http` / `http_diff`）：见下文「HTTP 黑盒侦察与差分（0.3.22）」
 - 证据核心（观察台账 / `report_finding_gated`）：见下文「证据核心：观察台账与闸门 finding（0.3.23）」
+- 内网原生协议与 AS-REP（`raw_tcp` / `ad_asreproast`）：见下文「内网原生协议与 AS-REP（0.3.24）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -381,6 +383,54 @@ worker 的代码固定工具纪律已要求：单请求 HTTP 侦察优先 `recon
 - 台账是 **per-intent**：跨意图证据请在当前意图重新观察，或改用 `report_finding` 并在 evidence 说明原因（TCP/非 HTTP/工具外证据）。
 
 worker 的代码固定工具纪律已要求：HTTP/服务类确认漏洞优先走 `report_finding_gated`；闸门拒绝的 finding 不要换工具硬报。
+
+---
+
+## 内网原生协议与 AS-REP（0.3.24）
+
+这一版补的是“目标不出网、HTTP 工具够不到”的原生 TCP 面，以及 AD 凭据路径里缺失的 AS-REP：
+
+### `raw_tcp`
+
+| 能力 | 说明 |
+|---|---|
+| 协议 | `raw`（任意 hex）/ `smb`（SMB2 NEGOTIATE）/ `ldap`（匿名 BindRequest）/ `mysql`（读服务端握手）/ `tds`（TDS PRELOGIN） |
+| 出站 | 优先任务隧道 SOCKS5 → 全局 SOCKS5 → 直连；结果里的 `egress` 标明 `task_socks5` / `global_socks5` / `direct` |
+| 代码职责 | 连接、超时、协议构造、响应读取、SMB2/LDAP/TDS/MySQL 指纹；**不做认证、爆破、利用** |
+| 入参 | `host`、`port`、`protocol`、`payload`、`proxy`（可选 `socks5://...`）、`timeout`、`read_len` |
+| 输出 | `request_hex` / `response_hex` / `response_len` / `fingerprint` / `egress` / `elapsed_ms`；失败返回连接/scope 错误 |
+| 边界 | 进任务 scope 硬校验；raw TCP 观察**不进入** `observation_ledger`，确认漏洞用 `report_finding`（TCP/非 HTTP）或 `exploit_author` |
+
+内网隔离时的正确顺序：
+
+```text
+tunnel_deploy / session_exec 确认可达
+  → raw_tcp host=10.x.x.x port=445 protocol=smb
+  → 根据 fingerprint 决定下一步（SMB/LDAP/TDS/MySQL）
+```
+
+`raw_tcp` 会自动读取该任务当前 alive 的 SOCKS5 隧道；没有隧道时退回全局 SOCKS5/直连。  
+`proxy=socks5://...` 可显式覆盖；HTTP 代理无法承载任意 TCP，会直接报错。
+
+### `ad_asreproast`
+
+- MITRE **T1558.004**；枚举 `DONT_REQ_PREAUTH` 账号并请求 AS-REP，解析 `$krb5asrep$`。
+- 有域凭据：`credential_id` / 本任务自动选择域匹配的 `password` / `hash_nt`，由 `GetNPUsers.py` 自行枚举。
+- 无凭据：传 `users` 列表，走 `-usersfile ... -no-pass`；用户列表会写入本意图运行目录的临时文件（不经过模型）。
+- 输出 `hashes[].hashcat_mode`：etype 23 → 18200，17 → 19800，18 → 19900；finding evidence 带完整哈希与对应 hashcat 命令。
+- 命中回写 finding；无命中回写 inferred fact；`dry_run=true` 只探测 88/LDAP 与 `GetNPUsers.py` 是否就绪。
+- 前提：DC 88/TCP 与 LDAP(389/636) 可达、时钟偏差 ≤5 分钟、`python -m pip install impacket`。
+
+### 本版未接入的高风险执行器
+
+`credential_spray`、`sqli_dump`、`upload_shell`、`ad_adcs_esc`、`ad_dcsync`、`lateral_move` **没有**按外部草案直接并入：
+
+- 凭据喷洒的 lockout 探测必须是真实实现，且默认 dry-run/人工确认；草案里的 `probeLockoutThreshold` 是返回 0 的占位，直接跑会锁账号。
+- SQLi dump 需要经过验证的布尔/时间 oracle；草案的 true/false 判定和 `s.fetchRaw` 不成立，直接落库会产出假数据。
+- ADCS/DCSync 属于高影响操作，需要 `certipy`/`secretsdump` 外部工具 + 显式确认 + 审计；不应作为 worker 默认工具。
+- `upload_shell` / `lateral_move` 已有 `exploit_author` / `session_exec` 通道，重复执行器会绕过现有 guard。
+
+这些能力在补齐“真实 lockout 策略读取 + dry-run 默认 + 显式 confirm + 证据回写”之前，继续走 `exploit_author` / `session_exec` / `msf_execute` 或人工外部工具。
 
 ---
 

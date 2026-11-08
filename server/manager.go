@@ -798,6 +798,18 @@ func (m *Manager) TaskProxyForTask(taskID int64) (addr, caCert string) {
 	return m.taskProxy.ForTask(ctx, taskID)
 }
 
+// TaskSocks5ForTask returns the task's tunnel SOCKS5 upstream for raw TCP tools.
+// Unlike TaskProxyForTask this does not require traffic capture: native protocol
+// probes only need the tunnel, not the HTTP MITM. Empty means no SOCKS5 upstream.
+func (m *Manager) TaskSocks5ForTask(taskID int64) string {
+	if m == nil || m.taskProxy == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return m.taskProxy.Socks5ForTask(ctx, taskID)
+}
+
 func (m *Manager) RefreshTaskProxy(taskID int64) {
 	if m.taskProxy == nil {
 		return

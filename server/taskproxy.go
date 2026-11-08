@@ -20,6 +20,7 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Autumn-27/artex/db"
@@ -102,7 +103,33 @@ func (m *taskProxyManager) resolveUpstream(ctx context.Context, taskID int64) (s
 	return pickUpstream(recs, gp), nil
 }
 
-// ForTask 返回任务 worker 应使用的代理地址与 CA:首次调用懒建该任务的 MITM
+// Socks5ForTask returns the task's current SOCKS5 upstream, if any. Raw TCP
+// tools (raw_tcp, native protocol probes) cannot use the HTTP MITM itself, but
+// can dial through the task's tunnel SOCKS5. Returns "" when no SOCKS5 upstream
+// is configured; callers then fall back to the global SOCKS5 or direct dial.
+func (m *taskProxyManager) Socks5ForTask(ctx context.Context, taskID int64) string {
+	if m == nil || taskID <= 0 {
+		return ""
+	}
+	m.mu.Lock()
+	inst := m.proxies[taskID]
+	if inst != nil {
+		m.refreshLocked(ctx, taskID, inst)
+	}
+	m.mu.Unlock()
+	if inst != nil {
+		if u := inst.tr.UpstreamProxy(); strings.HasPrefix(strings.ToLower(u), "socks5://") {
+			return u
+		}
+	}
+	u, err := m.resolveUpstream(ctx, taskID)
+	if err == nil && strings.HasPrefix(strings.ToLower(u), "socks5://") {
+		return u
+	}
+	return ""
+}
+
+// ForTask returns the task worker's proxy address and CA. 首次调用懒建该任务的 MITM
 // 实例(独立 CA 目录防首建竞争、端口池分配并登记端口审计台账),之后每次调用
 // 顺手重算上游(事件间隙的兜底,与 OnStateChange 的 Refresh 互补)。建实例失败
 // 只记日志并返回 "","" —— 调用方回落全局代理,绝不让录制子系统拖垮 worker。

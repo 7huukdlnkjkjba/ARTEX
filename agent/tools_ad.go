@@ -322,16 +322,22 @@ type kerberoastRunner struct {
 }
 
 func locateKerberoastRunner() (kerberoastRunner, error) {
-	if script, err := exec.LookPath("GetUserSPNs.py"); err == nil {
+	return locateImpacketScript("GetUserSPNs.py", "impacket-GetUserSPNs")
+}
+
+// locateImpacketScript resolves an impacket example script (GetUserSPNs.py,
+// GetNPUsers.py, ...) on PATH or next to the Python interpreter's Scripts dir.
+func locateImpacketScript(script, console string) (kerberoastRunner, error) {
+	if p, err := exec.LookPath(script); err == nil {
 		if py := findKerberoastPython(); py != "" {
-			return kerberoastRunner{Bin: py, BaseArgs: []string{script}}, nil
+			return kerberoastRunner{Bin: py, BaseArgs: []string{p}}, nil
 		}
 		if runtime.GOOS != "windows" {
-			return kerberoastRunner{Bin: script}, nil
+			return kerberoastRunner{Bin: p}, nil
 		}
-		return kerberoastRunner{}, fmt.Errorf("找到 GetUserSPNs.py 但没有 Python 解释器（python3/python/py 均不在 PATH）")
+		return kerberoastRunner{}, fmt.Errorf("找到 %s 但没有 Python 解释器（python3/python/py 均不在 PATH）", script)
 	}
-	if bin, err := exec.LookPath("impacket-GetUserSPNs"); err == nil {
+	if bin, err := exec.LookPath(console); err == nil {
 		return kerberoastRunner{Bin: bin}, nil
 	}
 	// PATH may not include the Python Scripts dir (common for a Windows service
@@ -339,12 +345,12 @@ func locateKerberoastRunner() (kerberoastRunner, error) {
 	if py := findKerberoastPython(); py != "" {
 		dir := filepath.Dir(py)
 		for _, cand := range []string{
-			filepath.Join(dir, "Scripts", "GetUserSPNs.py"),
-			filepath.Join(dir, "GetUserSPNs.py"),
-			filepath.Join(dir, "Scripts", "impacket-GetUserSPNs"),
-			filepath.Join(dir, "impacket-GetUserSPNs"),
-			filepath.Join(dir, "Scripts", "impacket-GetUserSPNs.exe"),
-			filepath.Join(dir, "impacket-GetUserSPNs.exe"),
+			filepath.Join(dir, "Scripts", script),
+			filepath.Join(dir, script),
+			filepath.Join(dir, "Scripts", console),
+			filepath.Join(dir, console),
+			filepath.Join(dir, "Scripts", console+".exe"),
+			filepath.Join(dir, console+".exe"),
 		} {
 			p, lookErr := exec.LookPath(cand)
 			if lookErr != nil {
@@ -356,7 +362,7 @@ func locateKerberoastRunner() (kerberoastRunner, error) {
 			return kerberoastRunner{Bin: p}, nil
 		}
 	}
-	return kerberoastRunner{}, fmt.Errorf("未找到 impacket：需要 GetUserSPNs.py 或 impacket-GetUserSPNs 在 PATH（或与 python 同目录的 Scripts 下）；安装命令：python -m pip install impacket")
+	return kerberoastRunner{}, fmt.Errorf("未找到 impacket：需要 %s 或 %s 在 PATH（或与 python 同目录的 Scripts 下）；安装命令：python -m pip install impacket", script, console)
 }
 
 func findKerberoastPython() string {
