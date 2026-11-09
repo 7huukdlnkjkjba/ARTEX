@@ -24,6 +24,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.23** | **证据核心（观察台账 + 闸门 finding）**：新增 `path_probe` / `admin_surface` / `fingerprint` / `auth_probe`，所有探测写入 per-intent `observation_ledger.json`（receipt_id + request/response hash + 完整性）；新增 `report_finding_gated`，只接受台账内、URL 匹配、response_hash 一致的证据，阻止凭印象/版本猜测写 finding |
 | **v0.3.24** | **内网原生协议 + AS-REP + DCSync**：新增 `raw_tcp`（SMB2/LDAP/TDS/MySQL/raw hex 原生 TCP 探测，自动走任务隧道 SOCKS5，代码构造与指纹，不做认证/利用）、`ad_asreproast`（T1558.004 AS-REP Roasting）与 `ad_dcsync`（T1003.006，必须显式 confirm，哈希不写 finding evidence） |
 | **v0.3.25** | **受控 Web 利用与 impacket 隧道**：新增 `sqlmap_run`（detect/dbs/current-user/is-dba/dump，dump 需 confirm+table）、`nuclei_run`（JSONL 解析、限速、关 interactsh）与 `impacket_proxy`（Linux/proxychains + 任务 SOCKS5，让 impacket 进隔离内网） |
+| **v0.3.26** | **DB / 隐写 / Windows 注入**：新增 `db_dump`（MySQL/PostgreSQL 只读直连，list/dump、标识符转义、行/单元格上限、dump 需 confirm）、`png_stego`（PNG LSB 隐藏/提取，SHA-256）与 `win_inject`（Windows-only CreateRemoteThread，process_name 校验 + confirm，dry_run） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -34,6 +35,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - 证据核心（观察台账 / `report_finding_gated`）：见下文「证据核心：观察台账与闸门 finding（0.3.23）」
 - 内网原生协议与 AS-REP（`raw_tcp` / `ad_asreproast` / `ad_dcsync`）：见下文「内网原生协议与 AS-REP（0.3.24）」
 - 受控 Web 利用与 impacket 隧道（`sqlmap_run` / `nuclei_run` / `impacket_proxy`）：见下文「受控 Web 利用与 impacket 隧道（0.3.25）」
+- DB / 隐写 / Windows 注入（`db_dump` / `png_stego` / `win_inject`）：见下文「DB、隐写与 Windows 注入（0.3.26）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -461,6 +463,33 @@ tunnel_deploy / session_exec 确认可达
 - `script` 只接受 impacket 脚本名（`GetNPUsers.py` / `secretsdump.py` / `findDelegation.py` 等），拒绝路径穿越；`args` 原样传给脚本。
 - 支持 `dry_run` 查看 script/python/proxychains/参数，不执行。
 
+---
+
+## DB、隐写与 Windows 注入（0.3.26）
+
+### `db_dump`
+
+- 支持 **MySQL / PostgreSQL**；`action=list` 只列表，`action=dump` 读取指定表前 N 行。
+- `dump` 必须 `confirm=true`；`tables` 可限定（最多 20），`limit_rows` 默认 10、上限 100；`timeout` 上限 900。
+- 只做 SELECT；所有库名/表名走 `quoteDBIdent` 转义；`db.SetMaxOpenConns(1)`；总输出 512KB、单元格 2KB 截断。
+- 返回 `rows/data` 给模型；finding evidence 只写表名/行数，不写数据。
+- 连接失败区分认证失败/不可达/库不存在；明确 `next_steps`。
+- 依赖 `go-sql-driver/mysql` 与 `lib/pq`（纯 Go，不依赖 CGO）。
+
+### `png_stego`
+
+- `action=hide|extract`；PNG RGB LSB，格式 `ARTX` + uint32 长度 + payload，Alpha 保留。
+- payload 上限 4MB；容量不足直接拒绝；`image_path` 不存在时生成 1000x1000 底板。
+- 返回 `bytes_hidden/bytes_extracted + SHA-256`；`extract` 默认不回传 payload，`return_payload=true` 且 ≤1MB 才回传 Base64。
+
+### `win_inject`
+
+- **仅 Windows**；非 Windows 返回 `tool_unsupported`。
+- `process_name` 必须与实际进程路径 basename 完全匹配；PID ≤4 拒绝；`method` 只支持 `createremote`。
+- 实际注入必须 `confirm=true`；`dry_run` 只校验 PID/进程名/shellcode，不分配内存、不注入。
+- shellcode 只接受 Base64/hex，≤1MB；不生成 shellcode、不做 APC/持久化；结果不回传 shellcode。
+- 这是高影响动作，必须在书面 RoE 与目标进程白名单内使用；不要作为默认自动步骤。
+
 ### 本版未接入的高风险执行器
 
 `credential_spray`、`sqli_dump`、`upload_shell`、`ad_adcs_esc`、`lateral_move` **没有**按外部草案直接并入：
@@ -472,7 +501,7 @@ tunnel_deploy / session_exec 确认可达
 
 这些能力在补齐“真实 lockout 策略读取 + dry-run 默认 + 显式 confirm + 证据回写”之前，继续走 `exploit_author` / `session_exec` / `msf_execute` 或人工外部工具。
 
-`raw_tcp` / `sqlmap_run` / `nuclei_run` / `impacket_proxy` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
+`raw_tcp` / `sqlmap_run` / `nuclei_run` / `impacket_proxy` / `db_dump` / `png_stego` / `win_inject` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
 
 ---
 

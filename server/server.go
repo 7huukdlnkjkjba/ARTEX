@@ -272,6 +272,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		s.seedRawTCPTools()        // 原生 TCP 协议探测 seed 进 tools 表(默认绑 worker)
 		s.seedWebWrapperTools()    // 受控 sqlmap/nuclei seed 进 tools 表(默认绑 worker)
 		s.seedImpacketProxyTools() // impacket 经任务 SOCKS5 seed 进 tools 表(默认绑 worker)
+		s.seedDBDumpTools()        // 受控 DB 直连 seed 进 tools 表(默认绑 worker)
+		s.seedPNGStegoTools()      // PNG LSB 隐写 seed 进 tools 表(默认绑 worker)
+		s.seedWinInjectTools()     // Windows 进程注入 seed 进 tools 表(默认绑 worker)
 		s.initTunnels(dataDir)     // 期 3a 多层代理隧道:Manager + 孤儿标 error + 健康巡检
 		s.seedTunnelTools()        // 隧道工具 seed 进 tools 表(默认绑 worker)
 		s.initReverse(dataDir)     // 期 5 反弹 handler:penelope 受管进程 + 上期 reverse 会话诚实标 dead

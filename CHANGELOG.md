@@ -22,6 +22,11 @@
 - **受控 `nuclei_run`**：默认 critical/high/medium、限速 50、关 interactsh、JSONL 解析去重后回写 finding。
 - **`impacket_proxy`**：Linux/proxychains + 任务 SOCKS5，让 impacket 进隔离内网；无隧道返回
   `no_tunnel`，Windows 返回 `tool_missing`；script 名白名单防路径穿越。
+- **`db_dump`**：MySQL/PostgreSQL 只读直连；list/dump；标识符转义、单连接、行/单元格/总输出上限；
+  dump 必须 confirm=true；finding evidence 不写数据。
+- **`png_stego`**：PNG RGB LSB 隐藏/提取；`ARTX` 头 + 长度；容量/4MB 上限；SHA-256；默认不回传 payload。
+- **`win_inject`**：Windows-only CreateRemoteThread；process_name 与进程 basename 校验、PID>4、
+  confirm=true、dry_run、shellcode ≤1MB；非 Windows 返回 tool_unsupported。
 
 ### 修改的功能
 
