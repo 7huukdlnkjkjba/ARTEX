@@ -285,6 +285,8 @@ func (t *EvolveTools) EvolvePromote(args PromoteArgs) (string, error) {
 	parts := strings.SplitN(target, ":", 2)
 	gene, err := pgdb.RegisterGeneRevision(t.DB, target, parts[0], filePath, []byte(args.NewContent), &curRev, "active")
 	if err != nil {
+		// Never leave a changed file without a matching genome revision.
+		_ = os.WriteFile(full, old, 0o644)
 		return "", err
 	}
 	_ = pgdb.RetireGene(t.DB, target, curRev, []string{fmt.Sprint(args.ProposalID)})
