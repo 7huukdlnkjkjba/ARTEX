@@ -2,38 +2,6 @@
 chcp 65001 >nul
 setlocal EnableExtensions DisableDelayedExpansion
 
-rem ============================================================
-rem  ARTEX reusable build + GitHub update script
-rem  Location: repo root build.bat, or agent\build.bat
-rem  Run from anywhere; it auto-detects the repository root.
-rem
-rem  Usage:
-rem    build.bat [commit message] [options]
-rem
-rem  Options:
-rem    --test          run `go test ./agent` after building
-rem    --no-commit     build only; do not stage/commit/push
-rem    --no-push       commit locally, do not push
-rem    --yes           do not ask for confirmation before commit/push
-rem    --edit-readme   open README.md in Notepad before staging
-rem    --pause         pause at the end (useful for double-click)
-rem    --help          show this help
-rem
-rem  Notes:
-rem    - Typed changes are staged: tracked modifications, README.md,
-rem      CHANGELOG.md, plus new agent/*.go, server/*.go, db/*.go,
-rem      agent/prompts/*.md and scripts/*.sql files.
-rem    - The script stages itself (repo-root build.bat or agent\build.bat).
-rem    - Other untracked files are never staged; use `git add <path>`
-rem      explicitly if you need them.
-rem    - Sensitive-looking staged paths are rejected (secrets, .env,
-rem      .key/.pem, pgdata, runtime logs, .exe, _cmp).
-rem    - A failed push keeps the local commit; re-run `git push -u origin <branch>`.
-rem ============================================================
-
-rem ---------- locate repository root ----------
-rem If go.mod is next to this script, that's the repo root.
-rem Otherwise assume the script lives in a subdir (e.g. agent\) and go up one level.
 if exist "%~dp0go.mod" (
   pushd "%~dp0" >nul 2>nul
 ) else (
@@ -55,7 +23,6 @@ set "COMMIT_MSG="
 set "DO_TEST=0"
 set "DO_COMMIT=1"
 set "DO_PUSH=1"
-set "ASSUME_YES=0"
 set "EDIT_README=0"
 set "DO_PAUSE=0"
 
@@ -79,14 +46,8 @@ if /I "%~1"=="--no-push" (
   goto parse_args
 )
 if /I "%~1"=="--all" (
-  echo [ERROR] --all is disabled: it could commit pentest-ai/runtime/secrets and local caches.
-  echo         Stage extra files explicitly with: git add ^<path^>
+  echo [ERROR] --all is disabled. Stage extra files explicitly with: git add ^<path^>
   goto fail
-)
-if /I "%~1"=="--yes" (
-  set "ASSUME_YES=1"
-  shift
-  goto parse_args
 )
 if /I "%~1"=="--edit-readme" (
   set "EDIT_README=1"
@@ -109,7 +70,6 @@ goto parse_args
 :args_done
 if not defined COMMIT_MSG set "COMMIT_MSG=chore: build %DATE% %TIME%"
 
-rem ---------- preflight ----------
 where go >nul 2>nul
 if errorlevel 1 (
   echo [ERROR] go not found in PATH
@@ -131,9 +91,6 @@ if errorlevel 1 (
   goto fail
 )
 
-rem Keep the Go cache inside the repo when no explicit cache is configured.
-rem This avoids permission failures in sandboxed terminals; these dirs are
-rem untracked and are never staged by the default path list.
 if not defined GOCACHE set "GOCACHE=%REPO%\.gocache"
 if not exist "%GOCACHE%" mkdir "%GOCACHE%" >nul 2>nul
 if not defined GOTMPDIR set "GOTMPDIR=%REPO%\.gotmp"
@@ -147,7 +104,6 @@ echo  Commit : %COMMIT_MSG%
 echo ============================================================
 echo.
 
-rem ---------- build ----------
 echo [1/4] go build ./...
 go build ./... || goto build_fail
 
@@ -165,7 +121,6 @@ if "%DO_COMMIT%"=="0" (
   goto cleanup
 )
 
-rem ---------- optional README edit ----------
 if "%EDIT_README%"=="1" (
   if exist "%REPO%\README.md" (
     echo [readme] opening Notepad; save and close it to continue...
@@ -175,7 +130,6 @@ if "%EDIT_README%"=="1" (
   )
 )
 
-rem ---------- stage ----------
 echo [3/4] staging changes
 git add -u
 if exist "%REPO%\README.md" git add -- "%REPO%\README.md"
@@ -185,9 +139,6 @@ git add -- "agent/prompts/*.md" "scripts/*.sql" 2>nul
 if exist "%REPO%\build.bat" git add -- "%REPO%\build.bat"
 if exist "%REPO%\agent\build.bat" git add -- "%REPO%\agent\build.bat"
 
-rem ---------- sensitive path guard ----------
-rem Defense in depth: never commit local runtime secrets/logs/binaries even if
-rem they were staged by `git add -u` or an explicit `git add`.
 set "STAGED_LIST=%TEMP%\artex-staged-%RANDOM%.txt"
 git diff --cached --name-only > "%STAGED_LIST%" 2>nul
 findstr /I /C:"pentest-ai/runtime/" /C:"/secrets/" /C:"admin_password" /C:"admin_token" /C:"llm_api_key" /C:"pg_super" /C:"pgdata" /C:"_cmp/" /C:"start-test.log" /C:".env" /C:".key" /C:".pem" /C:".exe" "%STAGED_LIST%" >nul 2>nul
@@ -208,12 +159,6 @@ if not errorlevel 1 (
   goto cleanup
 )
 
-if "%ASSUME_YES%"=="1" goto do_commit
-choice /C YN /M "Commit and push these changes"
-if errorlevel 2 goto abort
-if errorlevel 255 goto abort
-
-:do_commit
 echo [4/4] git commit
 git commit -m "%COMMIT_MSG%" || goto commit_fail
 
@@ -243,25 +188,14 @@ echo Options:
 echo   --test          run go test ./agent after building
 echo   --no-commit     build only; do not stage/commit/push
 echo   --no-push       commit locally, do not push
-echo   --yes           do not ask for confirmation before commit/push
 echo   --edit-readme   open README.md in Notepad before staging
 echo   --pause         pause at the end
 echo   --help          show this help
 echo.
 echo Default commit message: chore: build %%DATE%% %%TIME%%
-echo Default staged set: tracked modifications + README.md + CHANGELOG.md
-echo                     + new agent/*.go, server/*.go, db/*.go,
-echo                       agent/prompts/*.md, scripts/*.sql, build.bat.
-echo Other untracked files are never staged; use git add explicitly.
-echo Sensitive paths (pentest-ai/runtime, secrets, .env/.key/.pem, .exe,
-echo pgdata, _cmp, start-test.log) are rejected.
 popd
 endlocal
 exit /b 0
-
-:abort
-echo [info] aborted by user.
-goto cleanup
 
 :build_fail
 echo.
