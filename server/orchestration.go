@@ -53,6 +53,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools = append(tools, s.dbDumpTools()...)        // 受控 DB 直连,默认绑 worker
 	tools = append(tools, s.pngStegoTools()...)      // PNG LSB 隐写,默认绑 worker
 	tools = append(tools, s.winInjectTools()...)     // Windows 进程注入(高影响),默认绑 worker
+	tools = append(tools, s.evolveTools()...)        // AI 自进化 prompt/skill,默认绑 worker
 	tools = append(tools, s.tunnelTools()...)        // 隧道四件套(期 3a),默认绑 worker
 	tools = append(tools, s.reverseTools()...)       // 反弹监听(期 5),默认绑 worker
 	tools = append(tools, s.msfTools()...)           // Metasploit 决策层(msf_plan/msf_next/msf_execute),默认绑 worker

@@ -28,6 +28,11 @@
 - **`win_inject`**：Windows-only CreateRemoteThread；process_name 与进程 basename 校验、PID>4、
   confirm=true、dry_run、shellcode ≤1MB；非 Windows 返回 tool_unsupported。新增 opt-in
   `ARTEX_WIN_INJECT_LIVE=1` 集成测试：只对自建 sleep helper 注入 3 字节 `xor eax,eax; ret`。
+- **AI 改 AI：基因组与成本进化**：新增 `genome_genes/genome_phenotypes/genome_events/
+  evolve_runs/evolve_proposals/evolve_trials/evolve_costs` 表、任务终态表型采样、纯 SQL
+  成本归因，以及 `evolve_leaks/begin/read/propose/trial/compare/promote/abandon` 工具。
+  只允许改 prompt/skill 文本；token 增长 ≤10%、缓存前缀不变、净收益 >0 才晋升，禁止伪造
+  shadow 样本或由模型宣布 pass。
 
 ### 修改的功能
 

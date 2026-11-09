@@ -1,9 +1,5 @@
 package server
 
-// png_stego stores/retrieves a bounded payload in the RGB LSBs of a PNG.
-// Format: "ARTX" magic + uint32 little-endian length + payload, bit-packed MSB
-// first across R,G,B of each pixel. Alpha is preserved.
-
 import (
 	"bytes"
 	"context"
@@ -26,7 +22,7 @@ import (
 
 const (
 	stegoMagic      = "ARTX"
-	stegoMaxPayload = 4 << 20
+	stegoMaxPayload = 64 << 20
 )
 
 type pngStegoParams struct {
@@ -57,13 +53,13 @@ func (s *Server) seedPNGStegoTools() {
 func (s *Server) toolPNGStego() actool.CoreTool {
 	return actool.Build(actool.Spec{
 		Name:        "png_stego",
-		Description: "【PNG LSB 隐写】把 Base64 payload 隐藏到 PNG 的 RGB 最低有效位，或从 PNG 提取。执行归代码：容量校验、位运算、PNG 编解码、SHA-256；不生成/不执行 payload。",
+		Description: "【PNG RGB LSB 隐写】ARTX + uint32 长度头；payload 上限 64MB；Alpha 保留；返回 bytes_hidden/bytes_extracted + SHA-256；extract 默认回传 payload，return_payload=true 且 ≤1MB 才额外给 Base64；纯 Go，不生成/不执行 payload。",
 		Schema: objSchema(map[string]any{
 			"action":         strParam("hide | extract"),
 			"image_path":     strParam("载体 PNG 路径；hide 时不存在则生成 1000x1000 纯色底板"),
 			"payload":        strParam("Base64 编码的 payload（hide 用）"),
 			"out_path":       strParam("输出文件路径（hide 输出 PNG，extract 输出原始 payload）"),
-			"return_payload": map[string]any{"type": "boolean", "description": "extract 时是否在结果里返回 Base64（≤1MB；默认 false）"},
+			"return_payload": map[string]any{"type": "boolean", "description": "extract 时是否额外在结果里返回 Base64（≤1MB；默认 false）"},
 		}, "action", "image_path", "out_path"),
 		ReadOnly:    func(json.RawMessage) bool { return false },
 		Permissions: sessionPerm,
@@ -85,7 +81,7 @@ func (s *Server) toolPNGStego() actool.CoreTool {
 					return actool.Errorf("payload 需为 Base64: " + err.Error()), nil
 				}
 				if len(payload) == 0 || len(payload) > stegoMaxPayload {
-					return actool.Errorf("payload 长度需在 1..4MB"), nil
+					return actool.Errorf("payload 长度需在 1..64MB"), nil
 				}
 				img, err := loadOrCreateStegoImage(p.ImagePath)
 				if err != nil {
@@ -102,6 +98,7 @@ func (s *Server) toolPNGStego() actool.CoreTool {
 					"status": "success", "action": "hide", "out_path": p.OutPath,
 					"bytes_hidden": len(payload), "sha256": hex.EncodeToString(sum[:]),
 					"capacity_bytes": capacityBytes(img),
+					"payload_b64":    base64.StdEncoding.EncodeToString(payload),
 				})
 			case "extract":
 				img, err := loadPNG(p.ImagePath)
@@ -122,6 +119,9 @@ func (s *Server) toolPNGStego() actool.CoreTool {
 				res := map[string]any{
 					"status": "success", "action": "extract", "out_path": p.OutPath,
 					"bytes_extracted": len(payload), "sha256": hex.EncodeToString(sum[:]),
+				}
+				if len(payload) <= 1<<20 {
+					res["payload_b64"] = base64.StdEncoding.EncodeToString(payload)
 				}
 				if p.ReturnBase64 && len(payload) <= 1<<20 {
 					res["payload_b64"] = base64.StdEncoding.EncodeToString(payload)

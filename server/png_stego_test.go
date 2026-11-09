@@ -65,6 +65,9 @@ func TestPNGStegoRoundTrip(t *testing.T) {
 	if hide["status"] != "success" || hide["bytes_hidden"].(float64) != float64(len(payload)) {
 		t.Fatalf("hide = %+v", hide)
 	}
+	if hide["payload_b64"] == nil || hide["payload_b64"] == "" {
+		t.Error("hide missing payload_b64")
+	}
 	ex := callPNGStego(t, s, map[string]any{
 		"action": "extract", "image_path": hidden, "out_path": extracted, "return_payload": true,
 	})
@@ -81,6 +84,42 @@ func TestPNGStegoRoundTrip(t *testing.T) {
 	b64, _ := ex["payload_b64"].(string)
 	if b64 == "" {
 		t.Error("missing payload_b64")
+	}
+}
+
+func TestPNGStegoExtractDefaultReturnsPayload(t *testing.T) {
+	dir := t.TempDir()
+	carrier := filepath.Join(dir, "carrier.png")
+	hidden := filepath.Join(dir, "hidden.png")
+	extracted := filepath.Join(dir, "payload.bin")
+	writeTestPNG(t, carrier, 128, 128)
+	payload := []byte("default-return-payload")
+	s := &Server{}
+	callPNGStego(t, s, map[string]any{
+		"action": "hide", "image_path": carrier,
+		"payload": base64.StdEncoding.EncodeToString(payload), "out_path": hidden,
+	})
+	ex := callPNGStego(t, s, map[string]any{
+		"action": "extract", "image_path": hidden, "out_path": extracted,
+	})
+	if b64, _ := ex["payload_b64"].(string); b64 == "" {
+		t.Fatal("extract default should return payload_b64")
+	}
+}
+
+func TestPNGStegoMaxPayload64MB(t *testing.T) {
+	dir := t.TempDir()
+	carrier := filepath.Join(dir, "carrier.png")
+	writeTestPNG(t, carrier, 10, 10)
+	s := &Server{}
+	raw, _ := json.Marshal(map[string]any{
+		"action": "hide", "image_path": carrier,
+		"payload":  base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), 64<<20+1)),
+		"out_path": filepath.Join(dir, "out.png"),
+	})
+	res, _ := s.toolPNGStego().Call(context.Background(), raw, nil)
+	if !res.IsError || !strings.Contains(res.Flatten(), "64MB") {
+		t.Fatalf("res = %v %s", res.IsError, res.Flatten())
 	}
 }
 

@@ -21,7 +21,8 @@ rem    --help          show this help
 rem
 rem  Notes:
 rem    - Typed changes are staged: tracked modifications, README.md,
-rem      CHANGELOG.md, plus new agent/*.go and server/*.go files.
+rem      CHANGELOG.md, plus new agent/*.go, server/*.go, db/*.go,
+rem      agent/prompts/*.md and scripts/*.sql files.
 rem    - The script stages itself (repo-root build.bat or agent\build.bat).
 rem    - Other untracked files are never staged; use `git add <path>`
 rem      explicitly if you need them.
@@ -179,7 +180,8 @@ echo [3/4] staging changes
 git add -u
 if exist "%REPO%\README.md" git add -- "%REPO%\README.md"
 if exist "%REPO%\CHANGELOG.md" git add -- "%REPO%\CHANGELOG.md"
-git add -- "agent/*.go" "server/*.go" 2>nul
+git add -- "agent/*.go" "server/*.go" "db/*.go" 2>nul
+git add -- "agent/prompts/*.md" "scripts/*.sql" 2>nul
 if exist "%REPO%\build.bat" git add -- "%REPO%\build.bat"
 if exist "%REPO%\agent\build.bat" git add -- "%REPO%\agent\build.bat"
 
@@ -248,7 +250,8 @@ echo   --help          show this help
 echo.
 echo Default commit message: chore: build %%DATE%% %%TIME%%
 echo Default staged set: tracked modifications + README.md + CHANGELOG.md
-echo                     + new agent/*.go, server/*.go, build.bat, agent\build.bat.
+echo                     + new agent/*.go, server/*.go, db/*.go,
+echo                       agent/prompts/*.md, scripts/*.sql, build.bat.
 echo Other untracked files are never staged; use git add explicitly.
 echo Sensitive paths (pentest-ai/runtime, secrets, .env/.key/.pem, .exe,
 echo pgdata, _cmp, start-test.log) are rejected.

@@ -18,6 +18,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/config"
+	"github.com/Autumn-27/artex/cost"
 	pgdb "github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
@@ -363,6 +364,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	}
 	if err := pg.EnsureLLMUsageTable(); err != nil {
 		log.Printf("[llmusage] create table: %v", err)
+	}
+	if err := pgdb.EnsureGenomeSchema(pg.DB); err != nil {
+		log.Printf("[genome] create schema: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg), egress: guard.NewEgressGuard()}
 	guard.SetScopeStore(pg.Assets())
@@ -865,6 +869,37 @@ func (m *Manager) Close() error {
 }
 
 func isTerminalStatus(status string) bool { return pgdb.IsTerminal(status) }
+
+// recordTaskPhenotype is best-effort and asynchronous: it must never block or
+// fail a task transition. It samples token/cost data only after the task is in
+// a terminal state, then optionally appends drift events.
+func (m *Manager) recordTaskPhenotype(taskID int64, status, prev string) {
+	if m == nil || m.pg == nil || taskID <= 0 || !pgdb.IsTerminal(status) || pgdb.IsTerminal(prev) {
+		return
+	}
+	go func() {
+		id := strconv.FormatInt(taskID, 10)
+		totals, err := m.pg.TaskTokenTotals(id)
+		if err != nil {
+			log.Printf("[genome] task %d token totals: %v", taskID, err)
+			return
+		}
+		turns := 0
+		_ = m.pg.QueryRow(`SELECT COUNT(*) FROM llm_usage WHERE task_id=$1`, id).Scan(&turns)
+		elapsed := 0
+		m.mu.RLock()
+		if t := m.tasks[id]; t != nil && t.CreatedAt > 0 && t.CompletedAt > 0 {
+			elapsed = int(t.CompletedAt - t.CreatedAt)
+		}
+		m.mu.RUnlock()
+		cfg := cost.Load(m.pg)
+		spent := cfg.Spend(totals)
+		if err := OnTaskFinished(m.pg.DB, taskID, spent, status == "done", 0, 0,
+			elapsed, 0, turns, int64(totals.InputTokens), int64(totals.CacheRead)); err != nil {
+			log.Printf("[genome] task %d phenotype: %v", taskID, err)
+		}
+	}()
+}
 
 func unixOrZero(t *time.Time) int64 {
 	if t == nil {
@@ -1438,6 +1473,7 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	m.mu.Unlock()
 	m.taskStateMu.Unlock()
 	m.clearLogsOnTaskEnd(prev, status)
+	m.recordTaskPhenotype(n, status, prev)
 	return true, nil
 }
 
@@ -1469,6 +1505,7 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 	m.mu.Unlock()
 	m.taskStateMu.Unlock()
 	m.clearLogsOnTaskEnd(prev, status)
+	m.recordTaskPhenotype(n, status, prev)
 	return nil
 }
 
