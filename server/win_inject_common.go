@@ -1,3 +1,5 @@
+//go:build !windows
+
 package server
 
 // Shared validation/schema for win_inject. The actual injection implementation
