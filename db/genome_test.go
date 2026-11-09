@@ -1,6 +1,11 @@
 package db
 
-import "testing"
+import (
+	"fmt"
+	"os"
+	"testing"
+	"time"
+)
 
 func TestHashContent(t *testing.T) {
 	if a, b := HashContent([]byte("x")), HashContent([]byte("x")); a != b || len(a) != 64 {
@@ -58,5 +63,49 @@ func TestFitnessCacheHitRate(t *testing.T) {
 	}
 	if (Fitness{}).CacheHitRate() != 0 {
 		t.Fatal("zero input should be 0")
+	}
+}
+
+func TestGenomeSchemaRoundTrip(t *testing.T) {
+	dsn := os.Getenv("ARTEX_PG_DSN")
+	if dsn == "" {
+		t.Skip("ARTEX_PG_DSN not set")
+	}
+	d, err := Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err := EnsureGenomeSchema(d.DB); err != nil {
+		t.Fatal(err)
+	}
+	key := fmt.Sprintf("prompt:test-%d", time.Now().UnixNano())
+	taskID := time.Now().UnixNano()
+	defer d.Exec(`DELETE FROM genome_phenotypes WHERE task_id=$1`, taskID)
+	defer d.Exec(`DELETE FROM genome_genes WHERE gene_key=$1`, key)
+
+	rev, err := RegisterGeneRevision(d.DB, key, "prompt", "agent/prompts/test.md",
+		[]byte("hello"), nil, "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev.Revision != 1 || rev.ContentHash == "" {
+		t.Fatalf("rev = %+v", rev)
+	}
+	if err := RecordPhenotype(d.DB, taskID, Fitness{
+		CostCNY: 0.1, InputTokens: 100, CacheReadTokens: 50, Turns: 2,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	active, err := ActiveGenome(d.DB)
+	if err != nil || active[key] != 1 {
+		t.Fatalf("active = %v %v", active, err)
+	}
+	p, err := GeneCostProfileOf(d.DB, key, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SampleCount != 1 || p.AvgCostCNY != 0.1 || p.CacheHitRate != 0.5 {
+		t.Fatalf("profile = %+v", p)
 	}
 }
