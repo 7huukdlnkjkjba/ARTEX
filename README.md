@@ -26,6 +26,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.25** | **受控 Web 利用与 impacket 隧道**：新增 `sqlmap_run`（detect/dbs/current-user/is-dba/dump，dump 需 confirm+table）、`nuclei_run`（JSONL 解析、限速、关 interactsh）与 `impacket_proxy`（Linux/proxychains + 任务 SOCKS5，让 impacket 进隔离内网） |
 | **v0.3.26** | **DB / 隐写 / Windows 注入**：新增 `db_dump`（MySQL/PostgreSQL 只读直连，list/dump、标识符转义、行/单元格上限、dump 需 confirm）、`png_stego`（PNG LSB 隐藏/提取，SHA-256）与 `win_inject`（Windows-only CreateRemoteThread，process_name 校验 + confirm，dry_run） |
 | **v0.3.27** | **AI 改 AI：基因组与成本进化**：新增 `genome_*` 表、表型采样、纯 SQL 成本归因与 `evolve_*` 工具（leaks/begin/read/propose/trial/compare/promote/abandon）；只能改 prompt/skill 文本，晋升由 Go 按净收益判定 |
+| **v0.3.28** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -38,6 +39,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - 受控 Web 利用与 impacket 隧道（`sqlmap_run` / `nuclei_run` / `impacket_proxy`）：见下文「受控 Web 利用与 impacket 隧道（0.3.25）」
 - DB / 隐写 / Windows 注入（`db_dump` / `png_stego` / `win_inject`）：见下文「DB、隐写与 Windows 注入（0.3.26）」
 - AI 改 AI：基因组与成本进化（`evolve_*`）：见下文「AI 改 AI：基因组与成本进化（0.3.27）」
+- 前端源码审计（`web_audit`）：见下文「前端源码审计（0.3.28）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -537,6 +539,21 @@ tunnel_deploy / session_exec 确认可达
 - 没有真实 shadow 样本时 `evolve_compare` 只能返回 `enter_shadow`；当前 Phase 1 不自动派发 shadow worker，因此不会伪造“省钱了”的结论。
 - 方法论模板：[agent/prompts/self_evolve_prompt.md](agent/prompts/self_evolve_prompt.md)；运维查账：[scripts/evolve_costs.sql](scripts/evolve_costs.sql)。
 
+---
+
+## 前端源码审计（0.3.28）
+
+`web_audit` 抓取页面与外部 JS/CSS，做静态提取，不执行 JS：
+
+- HTML：表单 `action+method`、注释（可能泄漏测试账号/内部路径）。
+- JS：`fetch/axios/ajax` 调用、`/api/...` 字面量、AWS AK、阿里云 AK、JWT、`password/secret/token` 赋值、`.innerHTML`/`eval`/`document.write`/`dangerouslySetInnerHTML`/`setTimeout(string)`。
+- CSS：只发现路径，不做深度审计。
+- 默认只抓 **同 host** 资源；`include_external=true` 才抓跨域 CDN，且跨域 host 仍受任务 scope 校验，避免把 HTML 的 `src` 变成 SSRF。
+- `max_files` 默认 20（上限 100），`max_size` 默认 2MB（上限 8MB）。
+- 走任务 MITM（若开启）→ 目标，结果带 `egress=task_mitm|direct`；抓取动作会进流量台账。
+- 发现硬编码密钥且任务上下文可用时自动写 `hardcoded-secrets` finding；其余结果供模型交给 `recon_http`/`http_diff`/`path_probe` 复测。
+- 局限：不执行 JS、不处理 SPA 运行时路由；运行时接口/权限树仍需浏览器工具或 `http_diff`。
+
 ### 本版未接入的高风险执行器
 
 `credential_spray`、`sqli_dump`、`upload_shell`、`ad_adcs_esc`、`lateral_move` **没有**按外部草案直接并入：
@@ -548,7 +565,7 @@ tunnel_deploy / session_exec 确认可达
 
 这些能力在补齐“真实 lockout 策略读取 + dry-run 默认 + 显式 confirm + 证据回写”之前，继续走 `exploit_author` / `session_exec` / `msf_execute` 或人工外部工具。
 
-`raw_tcp` / `sqlmap_run` / `nuclei_run` / `impacket_proxy` / `db_dump` / `png_stego` / `win_inject` / `evolve_*` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
+`raw_tcp` / `sqlmap_run` / `nuclei_run` / `web_audit` / `impacket_proxy` / `db_dump` / `png_stego` / `win_inject` / `evolve_*` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
 
 ---
 

@@ -33,6 +33,9 @@
   成本归因，以及 `evolve_leaks/begin/read/propose/trial/compare/promote/abandon` 工具。
   只允许改 prompt/skill 文本；token 增长 ≤10%、缓存前缀不变、净收益 >0 才晋升，禁止伪造
   shadow 样本或由模型宣布 pass。
+- **`web_audit` 前端源码审计**：抓取 HTML 与外部 JS/CSS，提取表单/注释/API 路由/硬编码
+  AWS/Aliyun/JWT/密码/DOM XSS sink；默认同 host，跨域 CDN 需 include_external=true 且受
+  scope 校验；走任务 MITM；密钥自动写 finding；不执行 JS。
 
 ### 修改的功能
 

@@ -49,6 +49,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools = append(tools, s.credentialTools()...)    // 凭据工具(期 2),默认绑 worker
 	tools = append(tools, s.rawTCPTools()...)        // 原生 TCP 协议探测(内网可达性),默认绑 worker
 	tools = append(tools, s.webWrapperTools()...)    // 受控 sqlmap/nuclei,默认绑 worker
+	tools = append(tools, s.webAuditTools()...)      // 前端源码审计,默认绑 worker
 	tools = append(tools, s.impacketProxyTools()...) // impacket 经任务 SOCKS5,默认绑 worker
 	tools = append(tools, s.dbDumpTools()...)        // 受控 DB 直连,默认绑 worker
 	tools = append(tools, s.pngStegoTools()...)      // PNG LSB 隐写,默认绑 worker

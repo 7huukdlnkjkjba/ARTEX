@@ -271,6 +271,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		s.seedCredentialTools()    // 凭据工具 seed 进 tools 表(默认绑 worker)
 		s.seedRawTCPTools()        // 原生 TCP 协议探测 seed 进 tools 表(默认绑 worker)
 		s.seedWebWrapperTools()    // 受控 sqlmap/nuclei seed 进 tools 表(默认绑 worker)
+		s.seedWebAuditTools()      // 前端源码审计 seed 进 tools 表(默认绑 worker)
 		s.seedImpacketProxyTools() // impacket 经任务 SOCKS5 seed 进 tools 表(默认绑 worker)
 		s.seedDBDumpTools()        // 受控 DB 直连 seed 进 tools 表(默认绑 worker)
 		s.seedPNGStegoTools()      // PNG LSB 隐写 seed 进 tools 表(默认绑 worker)
