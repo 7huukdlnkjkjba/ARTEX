@@ -26,7 +26,8 @@
   dump 必须 confirm=true；finding evidence 不写数据。
 - **`png_stego`**：PNG RGB LSB 隐藏/提取；`ARTX` 头 + 长度；容量/4MB 上限；SHA-256；默认不回传 payload。
 - **`win_inject`**：Windows-only CreateRemoteThread；process_name 与进程 basename 校验、PID>4、
-  confirm=true、dry_run、shellcode ≤1MB；非 Windows 返回 tool_unsupported。
+  confirm=true、dry_run、shellcode ≤1MB；非 Windows 返回 tool_unsupported。新增 opt-in
+  `ARTEX_WIN_INJECT_LIVE=1` 集成测试：只对自建 sleep helper 注入 3 字节 `xor eax,eax; ret`。
 
 ### 修改的功能
 

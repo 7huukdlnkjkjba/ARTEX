@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeWinShellcode(t *testing.T) {
@@ -127,5 +129,59 @@ func TestWinInjectProcessMismatch(t *testing.T) {
 	}
 	if !res.IsError || !strings.Contains(res.Flatten(), "进程名不匹配") {
 		t.Fatalf("res = %v %s", res.IsError, res.Flatten())
+	}
+}
+
+// TestWinInjectLiveBenign is an explicit, opt-in live test. It builds a tiny
+// helper process that just sleeps, injects a 3-byte "xor eax,eax; ret" stub into
+// that helper only, and verifies CreateRemoteThread succeeded. It never targets
+// a system/EDR process. Default runs skip; set ARTEX_WIN_INJECT_LIVE=1 to run.
+func TestWinInjectLiveBenign(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only")
+	}
+	if os.Getenv("ARTEX_WIN_INJECT_LIVE") != "1" {
+		t.Skip("set ARTEX_WIN_INJECT_LIVE=1 to run the live benign injection test")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "sleep.go")
+	if err := os.WriteFile(src, []byte("package main\nimport \"time\"\nfunc main(){ time.Sleep(60*time.Second) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "artex-sleep.exe")
+	build := exec.Command("go", "build", "-o", exe, src)
+	build.Env = os.Environ()
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build helper: %v\n%s", err, out)
+	}
+	child := exec.Command(exe)
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+	}()
+	time.Sleep(300 * time.Millisecond)
+
+	// 31 C0 C3 = xor eax,eax; ret. Thread returns immediately; no payload logic.
+	raw, _ := json.Marshal(map[string]any{
+		"pid": child.Process.Pid, "process_name": filepath.Base(exe),
+		"shellcode": base64.StdEncoding.EncodeToString([]byte{0x31, 0xC0, 0xC3}),
+		"confirm":   true,
+	})
+	res, err := (&Server{}).toolWinInject().Call(context.Background(), raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("live injection failed: %s", res.Flatten())
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(res.Flatten()), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["status"] != "success" || out["injected_bytes"].(float64) != 3 {
+		t.Fatalf("out = %+v", out)
 	}
 }

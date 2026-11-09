@@ -488,6 +488,7 @@ tunnel_deploy / session_exec 确认可达
 - `process_name` 必须与实际进程路径 basename 完全匹配；PID ≤4 拒绝；`method` 只支持 `createremote`。
 - 实际注入必须 `confirm=true`；`dry_run` 只校验 PID/进程名/shellcode，不分配内存、不注入。
 - shellcode 只接受 Base64/hex，≤1MB；不生成 shellcode、不做 APC/持久化；结果不回传 shellcode。
+- 集成测试默认跳过；设 `ARTEX_WIN_INJECT_LIVE=1` 时会构建一个只 sleep 的 helper，向该 helper 注入 3 字节 `xor eax,eax; ret`，验证 `CreateRemoteThread` 成功，不碰系统/EDR 进程。
 - 这是高影响动作，必须在书面 RoE 与目标进程白名单内使用；不要作为默认自动步骤。
 
 ### 本版未接入的高风险执行器
