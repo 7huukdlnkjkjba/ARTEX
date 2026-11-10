@@ -156,6 +156,7 @@ git status --short
 git diff --cached --quiet
 if not errorlevel 1 (
   echo [info] no staged changes; nothing to commit.
+  if "%DO_PUSH%"=="1" call :push_if_ahead
   goto cleanup
 )
 
@@ -178,6 +179,22 @@ git push -u origin "%BRANCH%" || goto push_fail
 echo.
 echo [done] build, commit and push completed.
 goto cleanup
+
+:push_if_ahead
+for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%b"
+if "%BRANCH%"=="HEAD" goto :eof
+set "AHEAD="
+for /f "delims=" %%a in ('git rev-list --count origin/%BRANCH%..%BRANCH% 2^>nul') do set "AHEAD=%%a"
+if not defined AHEAD goto :eof
+if "%AHEAD%"=="0" goto :eof
+echo [push] local is ahead of origin/%BRANCH% by %AHEAD% commit^(s^); pushing
+git push -u origin "%BRANCH%"
+if errorlevel 1 (
+  echo [ERROR] push failed while catching up ahead commits.
+  goto :eof
+)
+echo [done] caught up %AHEAD% commit^(s^) to origin/%BRANCH%.
+goto :eof
 
 :usage
 echo ARTEX reusable build + GitHub update script
