@@ -161,6 +161,7 @@ if not errorlevel 1 (
 )
 
 echo [4/4] git commit
+echo [OK] 提交成功
 git commit -m "%COMMIT_MSG%" || goto commit_fail
 
 if "%DO_PUSH%"=="0" (
