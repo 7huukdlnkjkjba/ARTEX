@@ -91,6 +91,9 @@ func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (st
 	}
 	if term.Err != nil {
 		fmt.Fprintf(&b, "- **底层错误**: `%v`\n", term.Err)
+		if hint := providerErrorHint(term.Err); hint != "" {
+			fmt.Fprintf(&b, "- **诊断**: %s\n", hint)
+		}
 	}
 	if aborted && strings.TrimSpace(term.Text) != "" {
 		b.WriteString("- **取消前已生成的部分输出**:\n\n")
@@ -133,6 +136,33 @@ func terminalReasonHint(reason harness.TerminalReason) string {
 		return "运行的 context 已取消，但底层没有产生 Terminal 事件"
 	}
 	return "未知终态；harness 可能新增了 TerminalReason，请补充 reasonHint"
+}
+
+// providerErrorHint turns the opaque provider error text into one actionable
+// line for the UI. norma renders HTTP failures as "<provider>: status <code>:
+// <body>"; a 403 from the Anthropic default endpoint is the most misleading
+// case — it means "this region is not allowed", not "this key is wrong", and it
+// usually happens because a third-party model was configured without its
+// Anthropic-compatible Base URL (empty means api.anthropic.com).
+func providerErrorHint(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "status 403"):
+		if strings.Contains(msg, "request not allowed") || strings.Contains(msg, "forbidden") {
+			return "端点返回 403（请求被拒绝）。Anthropic 官方端点会对部分国家/地区返回该错误；" +
+				"若使用的是 DeepSeek 等第三方模型，请检查 Base URL 是否漏填——留空会默认请求 " +
+				"api.anthropic.com（DeepSeek 的 Anthropic 兼容端点为 https://api.deepseek.com/anthropic）。"
+		}
+		return "端点返回 403：API Key 无权访问该模型或端点。"
+	case strings.Contains(msg, "status 401"):
+		return "端点返回 401：API Key 无效，或与该 Base URL 不匹配。"
+	case strings.Contains(msg, "status 404"):
+		return "端点返回 404：Base URL 路径或模型名不存在，请核对端点与模型 id。"
+	}
+	return ""
 }
 
 func progressSuffix(term *harness.Terminal, tr *runTrace) string {

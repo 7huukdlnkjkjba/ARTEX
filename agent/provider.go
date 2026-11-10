@@ -192,6 +192,9 @@ func FromEnv() (Config, bool) {
 			c.Model = "claude-opus-4-8"
 		}
 	}
+	if c.Format == llm.FormatAnthropic && c.BaseURL == "" {
+		c.BaseURL = DefaultAnthropicBaseURL(c.Model)
+	}
 	if !c.KeyOptional() {
 		return Config{}, false
 	}
@@ -234,11 +237,43 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		c.Format = llm.FormatAnthropic
 		// provider appends "/v1/messages".
 		c.BaseURL = strings.TrimRight(strings.TrimSuffix(c.BaseURL, "/v1/messages"), "/")
+		// 空 Base URL 在 anthropic 格式下等于官方端点。第三方模型（DeepSeek 等）
+		// 用 Anthropic 兼容格式时若漏填，会静默发往 api.anthropic.com 被地域拒绝
+		// （403 forbidden "Request not allowed"）。按模型名回落到厂商官方兼容端点，
+		// 让已经存成空 Base URL 的老配置也能自愈。
+		if c.BaseURL == "" {
+			c.BaseURL = DefaultAnthropicBaseURL(c.Model)
+		}
 		if c.Model == "" {
 			c.Model = "claude-opus-4-8"
 		}
 	}
 	return c
+}
+
+// anthropicCompatibleEndpoints maps a model-name prefix to the vendor's official
+// Anthropic-compatible API base (the provider appends "/v1/messages"). Only
+// vendors that publish such an endpoint belong here; anything else falls back to
+// Anthropic's own default.
+var anthropicCompatibleEndpoints = []struct {
+	prefix  string
+	baseURL string
+}{
+	{"deepseek", "https://api.deepseek.com/anthropic"},
+}
+
+// DefaultAnthropicBaseURL returns the official Anthropic-compatible endpoint for
+// the model's vendor, or "" when the model does not identify a known vendor.
+// Callers use it to turn "empty Base URL + third-party model" from a silent 403
+// into the endpoint the operator actually meant.
+func DefaultAnthropicBaseURL(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	for _, e := range anthropicCompatibleEndpoints {
+		if strings.HasPrefix(m, e.prefix) {
+			return e.baseURL
+		}
+	}
+	return ""
 }
 
 // isFalsy reports whether an env-var string explicitly requests "off". Empty or

@@ -1536,6 +1536,12 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 和保存同一个校验：空 Base URL 的 anthropic 配置会默认打 api.anthropic.com，
+	// 第三方模型在这里就该看到"填端点"的明确提示，而不是一个 403。
+	if err := validateAnthropicEndpoint(req.Provider, req.Model, req.BaseURL); err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").

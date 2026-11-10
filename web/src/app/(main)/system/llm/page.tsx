@@ -65,6 +65,40 @@ const EFFORT_LEVELS: { value: string; label: string }[] = [
   { value: "max", label: "max" },
 ];
 
+// 常用云服务商一键填充：格式 + 官方端点 + 常用模型。
+// anthropic 格式留空 Base URL 等于请求 api.anthropic.com；DeepSeek 等第三方
+// Anthropic 兼容模型漏填端点会被 Anthropic 以 403 "Request not allowed" 拒绝
+// （地域限制），所以这里把端点直接带出来，避免手填时漏项。
+const PROVIDER_PRESETS: {
+  label: string;
+  title: string;
+  format: "anthropic" | "openai";
+  baseUrl: string;
+  model: string;
+}[] = [
+  {
+    label: "Anthropic",
+    title: "Anthropic 官方：https://api.anthropic.com",
+    format: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-opus-4-8",
+  },
+  {
+    label: "DeepSeek",
+    title: "DeepSeek 官方（Anthropic 兼容）：https://api.deepseek.com/anthropic",
+    format: "anthropic",
+    baseUrl: "https://api.deepseek.com/anthropic",
+    model: "deepseek-chat",
+  },
+  {
+    label: "OpenAI",
+    title: "OpenAI 官方：https://api.openai.com/v1",
+    format: "openai",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o",
+  },
+];
+
 function cooldownText(secs: number) {
   if (secs <= 0) return "";
   if (secs < 60) return `${secs}s`;
@@ -450,6 +484,14 @@ function ProfileSheet({
     toast.info("已切到本地 OpenAI 兼容端点，Key 可留空");
   }
 
+  /** One-click cloud providers: fills format, official endpoint and a model. */
+  function applyProviderPreset(p: (typeof PROVIDER_PRESETS)[number]) {
+    setFormat(p.format);
+    setBaseUrl(p.baseUrl);
+    setModel(p.model);
+    toast.info(`已填入 ${p.label} 官方端点与常用模型，可点右侧刷新按钮加载模型列表确认`);
+  }
+
   async function save() {
     if (!name.trim() || !model.trim()) {
       toast.error("请填写名称与模型");
@@ -596,6 +638,22 @@ function ProfileSheet({
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
             />
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-muted-foreground text-xs">常用服务商：</span>
+              {PROVIDER_PRESETS.map((p) => (
+                <Button
+                  key={p.label}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  title={p.title}
+                  onClick={() => applyProviderPreset(p)}
+                >
+                  {p.label}
+                </Button>
+              ))}
+            </div>
             <div className="flex flex-wrap gap-1.5">
               <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => applyLocalPreset("http://127.0.0.1:11434/v1", "qwen2.5:7b")}>
                 Ollama
@@ -613,6 +671,11 @@ function ProfileSheet({
             <p className="text-muted-foreground text-xs">
               本地/LAN 端点（localhost、127.0.0.1、10/172.16–31/192.168、*.local、compose 服务名）可以留空 Key；
               模型需要支持 OpenAI tool calling（qwen2.5、llama3.1+ 等）。
+            </p>
+            <p className="text-muted-foreground text-xs">
+              Anthropic 格式留空 Base URL 时会默认请求 <code>api.anthropic.com</code>。使用 DeepSeek 等第三方
+              Anthropic 兼容模型时必须填写其端点（如 <code>https://api.deepseek.com/anthropic</code>），
+              否则请求会发往 Anthropic 并被以 403 “Request not allowed” 拒绝。
             </p>
           </div>
 

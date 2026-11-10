@@ -1808,6 +1808,12 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
+	// 空 Base URL + 非 Claude 模型 = 请求会静默发到 api.anthropic.com 并被 403
+	// 拒绝；保存时就挡住，并给出可直接照填的端点，而不是等任务跑起来才炸。
+	if err := validateAnthropicEndpoint(p.Format, p.Model, p.BaseURL); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	local := agent.IsLocalEndpoint(p.BaseURL)
 	// Switching a saved local profile back to a cloud endpoint must not send the
 	// "local" placeholder as a real key. Require an explicit key in that case.

@@ -137,6 +137,49 @@ func TestTerminalTextNonAbortReasons(t *testing.T) {
 	}
 }
 
+func TestProviderErrorHint(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string // substring; "" = no hint
+	}{
+		{
+			name: "anthropic geo block",
+			err:  errors.New(`anthropic: status 403: {"error":{"type":"forbidden","message":"Request not allowed"}}`),
+			want: "api.deepseek.com/anthropic",
+		},
+		{name: "401", err: errors.New("openai: status 401: invalid api key"), want: "401"},
+		{name: "404", err: errors.New("anthropic: status 404: model not found"), want: "模型名不存在"},
+		{name: "transient", err: errors.New("openai: status 429: rate limited"), want: ""},
+		{name: "nil", err: nil, want: ""},
+	}
+	for _, c := range cases {
+		got := providerErrorHint(c.err)
+		if c.want == "" {
+			if got != "" {
+				t.Errorf("%s: unexpected hint: %q", c.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%s: hint %q does not contain %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The 403 body from Anthropic's blocked-region response must show up in the UI
+// with an actionable diagnosis, not just as an opaque provider error.
+func TestTerminalTextShowsProviderDiagnosis(t *testing.T) {
+	trace := &runTrace{startedAt: time.Now()}
+	_, detail := terminalText(context.Background(), &harness.Terminal{
+		Reason: harness.ReasonModelError,
+		Err:    errors.New(`anthropic: status 403: {"error":{"type":"forbidden","message":"Request not allowed"}}`),
+	}, trace)
+	if !strings.Contains(detail, "**诊断**") || !strings.Contains(detail, "Base URL") {
+		t.Fatalf("403 diagnosis missing from terminal detail:\n%s", detail)
+	}
+}
+
 func TestAbortCausesAreWellFormed(t *testing.T) {
 	all := []*AbortCause{
 		AbortPausedByUser, AbortPausedByOrchestrator, AbortTaskDeleted, AbortPausedOnReload,
