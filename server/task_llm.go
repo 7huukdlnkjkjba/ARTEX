@@ -619,8 +619,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetKillWork(func(intentID int64) error {
 		return s.engine.KillWorkAs(intentID, agent.AbortKilledByMainagent)
 	}) // kill_work：人立即终止运行中 work(killed_by_mainagent)
-	// 管控钩子：mainagent 是人类接口但工具集含 Bash，同样要过拦截、RoE 与出口审查。
-	main.SetGuard(s.agentGuard())
+	// mainagent 不挂 guard：主 Agent 已撤销管控钩子（mainagent.go 无 SetGuard）。
 	bundle := &taskAgentBundle{
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
 		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,

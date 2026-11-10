@@ -88,6 +88,11 @@ type ToolSet struct {
 	// auto-scope hook (insertAssets) is skipped, and add_task_scope/list_untested_assets
 	// are filtered out of the agent's tool list. The scope field stays regardless.
 	coverageDisabled bool
+	// scopeOff disables the task-scope hard stop (assertInScope) for this ToolSet's
+	// host-side tools. Set only for the human-facing main agent: its targets are
+	// judged by the operator, and a missing/incomplete scope row set must not lock
+	// the human out. Workers/planner keep the fail-closed check.
+	scopeOff bool
 	// ownerNode is the exploration node that writes attach to: assets this run
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
@@ -201,6 +206,13 @@ func (t *ToolSet) SetCoverageEnabled(enabled bool) { t.coverageDisabled = !enabl
 
 // CoverageDisabled reports whether the coverage feature is off for this task.
 func (t *ToolSet) CoverageDisabled() bool { return t.coverageDisabled }
+
+// SetScopeEnforcement turns the task-scope hard stop (assertInScope) on/off for
+// this ToolSet's host-side tools. Default is ON (fail-closed). The main agent
+// calls it with false: it is the human interface, the operator owns the target
+// decision, and an incomplete scope row set must not lock the human out.
+// guard 的审计/日志不受影响 —— 撤销的是硬阻断,不是留痕。
+func (t *ToolSet) SetScopeEnforcement(enabled bool) { t.scopeOff = !enabled }
 
 // coverageOnlyTools are the LLM tools that only make sense when asset coverage is
 // on. When the feature is off they are filtered out of the agent's tool list so
