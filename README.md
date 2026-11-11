@@ -812,6 +812,77 @@ API Key 留空，保存后「设为激活」即可。
 - 7B 模型在长上下文里会变慢，建议在 LLM 配置里把「上下文窗口(K)」设成模型真实值（如 32/128），
   并适当降低每任务 worker 数。
 
+### 内置免费模型池（0 成本，免 Key 起步）
+
+除 Chat2API 外，ARTEX 还自带一套**免费账号池**：来源目录内置、成员是普通 LLM 配置，
+不需要任何外部程序就能开跑。入口在 **系统 → LLM 配置** 顶部的「内置免费模型池」卡片。
+
+| 来源 | 免 Key | 说明 |
+|---|---|---|
+| Pollinations | ✅ | 匿名档 `openai-fast`（gpt-oss-20b），支持 tool calling；限 1 次/45 秒，填 pollen key 可提额 |
+| OpenRouter | ❌（自备 Key） | 免费档模型带 `:free` 后缀，每天有免费额度 |
+| Groq | ❌（自备 Key） | 免费额度、响应快 |
+| Google Gemini | ❌（自备 Key） | AI Studio 免费额度（OpenAI 兼容端点） |
+
+用法：
+
+1. 打开卡片，点 **检测**：每个成员会真的发一次极小的 chat completion（不是只看 `/models` 200），
+   用绿点标出可用来源；
+2. 打开右侧开关 **启用**：自动选第一个能回话的来源设为激活，并打开「轮询配置」的故障转移——
+   当前来源被限流/报错时自动换下一个池成员，任务不会卡死；
+3. 也可以只点某个成员的 **设为激活** 单独使用；
+4. OpenRouter / Groq / Gemini 的免费档点 **添加账号**，选来源、填自己的 Key 即可入池。
+   免 Key 来源首次启动自动入池，不需要添加。
+
+注意：
+
+- 免费源是共享算力：会限流、会排队，`openai-fast` 也不是强模型；重要任务建议配云端 Key，
+  把免费池当兜底（故障转移会自动切过去）；
+- 池成员的 `api_key` 对免 Key 来源存的是占位值 `free-pool`（ARTEX 认为远端端点必须有 Key，
+  该值不会外泄，Pollinations 也会忽略 `Authorization`）；
+- 每个成员默认带保守限速（Pollinations 1 次/45 秒；带 Key 的免费档 0.5–1 req/s、30 req/min），
+  可在配置卡片里改；跑多任务时别把限速拉满，否则会看到大量 429/402；
+- 免费来源的可用性不在我们控制范围内，目录里加新来源只需改 `server/freepool.go` 的
+  `builtinFreeSources()`。
+
+### 免费模型源：Chat2API（内置，0 成本）
+
+[Chat2API](https://github.com/xiaoY233/Chat2API) 是本地桌面端聚合代理：它驱动 DeepSeek、GLM、Kimi、
+MiniMax、Qwen、Z.ai 等官方 Web UI，把这些账号额度转成 **OpenAI 兼容接口**，等于不额外花钱就能给 ARTEX
+供模型。ARTEX 只当它是普通的 OpenAI 兼容端点，无需改代码。
+
+**内置配置**：首次启动（连上 PostgreSQL）时，ARTEX 会自动建好一条名为 **`Chat2API（免费）`** 的 LLM 配置
+（`openai` 格式、`http://127.0.0.1:8080/v1`、默认模型 `deepseek-v4-pro`、本地端点免 Key）。它**不会自动激活**，
+也不会参与故障转移轮询，避免 Chat2API 没开时把请求带走；只有你手动「设为激活」才启用。删掉后下次启动会重新内置。
+
+使用步骤：
+
+1. 启动 Chat2API 桌面端，在「供应商」页添加账号并完成登录（OAuth / Token 均可），确认「代理」已启动；
+2. 记下代理端口（默认 `8080`，可在 Chat2API 设置里改；注意别和本机 llama.cpp 的 8080 撞车）；
+3. ARTEX 打开 **系统 → LLM 配置**，列表里已有 `Chat2API（免费）`：
+   - 直接点卡片上的 **设为激活** 即可；模型不是 `deepseek-v4-pro` 时点「编辑」，用模型右侧刷新按钮从
+     `/models` 拉取后选中（如 `glm-5.1`、`kimi-k2.6`）；
+   - 也可以不激活内置项，**新建**一个并点 Base URL 下方的 **Chat2API** 预设，效果相同；
+4. API Key 留空（同机 `127.0.0.1` 属本地端点）；若在 Chat2API 里开启了 Key 校验，则填它生成的 `sk-...`。
+
+不想开 UI 也可以用环境变量：
+
+```bash
+export ARTEX_LLM_PROVIDER=openai
+export ARTEX_LLM_BASE_URL=http://127.0.0.1:8080/v1
+export ARTEX_LLM_MODEL=deepseek-v4-pro
+# 不设置 OPENAI_API_KEY（本地端点会补占位 Key）
+```
+
+注意：
+
+- Chat2API 默认只监听 `127.0.0.1`；与 ARTEX 不同机时，先在 Chat2API 设置里把监听地址改成 `0.0.0.0`，
+  再把这里的 `127.0.0.1` 换成 Chat2API 所在机器的 IP（注意其默认端口 8080）；
+- Chat2API 的工具调用是通过提示词模拟的，兼容 Cherry Studio / Kilo Code 这类客户端；ARTEX 的 planner
+  依赖严格 tool calling，复杂任务建议优先选原生支持 function calling 的模型，或在 Chat2API 里调整
+  「工具调用」相关设置；
+- 网页账号有频控，跑多任务时把 LLM 配置里的「每秒/每分钟请求」限制调低，避免账号被限流。
+
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
 **日志**：任务终态自动清空日志——任务进入 `done` / `failed` / `timeout` 时清空后端日志（内存缓冲 + 数据库 `server_logs`），成功与失败一视同仁；「系统 → 日志」页的「清空日志」按钮也可随时手动清空（内存与数据库一起删，其它打开的日志页同步清屏）。不想自动清空可在「系统配置 → 任务跑完自动清日志」关闭（默认开，切换即时生效）。
@@ -1128,3 +1199,4 @@ flowchart TB
 ### 免责声明
 
 本项目按“现状（AS IS）”提供，不附带任何明示或默示的担保。作者及贡献者不对使用本工具（无论使用方式是否得当）所导致的任何直接或间接损失、数据丢失、系统损坏或法律纠纷承担责任。**下载、安装或使用本项目，即表示你已阅读、理解并同意上述全部条款。**
+

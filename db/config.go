@@ -159,7 +159,9 @@ ORDER BY is_default DESC, priority DESC, id ASC`)
 // SaveProfile inserts (id==0) or updates a profile. Empty apiKey on update keeps existing.
 func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 	hint := p.APIKeyHint
-	if len(p.APIKey) >= 4 {
+	// Only derive the "…last4" hint when the caller did not supply one; the free
+	// pool sets an explicit operator-facing hint ("免费端点，无需 Key").
+	if hint == "" && len(p.APIKey) >= 4 {
 		hint = "…" + p.APIKey[len(p.APIKey)-4:]
 	}
 	r := p.Retry.Clamped()

@@ -1519,3 +1519,18 @@ CREATE INDEX IF NOT EXISTS idx_tunnels_state ON tunnels(state);
 -- honeypot_evidence: 命中签名证据,JSON 数组文本(如 ["cowrie_default_ssh_banner(Cowrie, 0.99)"]),合并去重。
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS honeypot_score REAL NOT NULL DEFAULT 0;
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS honeypot_evidence TEXT NOT NULL DEFAULT '';
+
+-- =====================================================================
+-- N. 内置免费模型池（FREE POOL）
+-- =====================================================================
+-- 账号池的一条「账号」= 一个免费来源(如 pollinations 免 Key、openrouter 免费档)
+-- 对应的 llm_profiles 行。profile 被删时账号级联删除；池的开关等运行时状态存
+-- settings(free_pool_enabled)，不在这里。
+CREATE TABLE IF NOT EXISTS free_pool_accounts (
+    id         BIGSERIAL PRIMARY KEY,
+    source     TEXT NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    profile_id BIGINT NOT NULL UNIQUE REFERENCES llm_profiles(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_free_pool_source ON free_pool_accounts(source);

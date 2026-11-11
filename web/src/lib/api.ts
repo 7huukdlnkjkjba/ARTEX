@@ -66,6 +66,8 @@ import type {
   InterceptRule,
   JudgeConfig,
   JudgeUsage,
+  FreePoolAccount,
+  FreePoolData,
   LLMPoolStatus,
   LLMProfile,
   LLMRecordDetail,
@@ -1009,6 +1011,22 @@ export const api = {
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
   // 轮询链的实际顺序 + 各配置的熔断状态。
   llmPool: () => get<LLMPoolStatus>("/llm/pool"),
+  // 内置免费模型池（池成员是普通 LLM 配置，见 server/freepool.go）。
+  freePool: () => get<FreePoolData>("/llm/free-pool"),
+  freePoolProbe: () =>
+    post<{ ok: boolean; results: { account_id: number; ok: boolean; latency_ms?: number; error?: string }[] }>(
+      "/llm/free-pool/probe",
+      {},
+    ),
+  freePoolAdd: (p: { source: string; label?: string; api_key?: string; model?: string }) =>
+    post<{ ok: boolean; account: FreePoolAccount }>("/llm/free-pool/accounts", p),
+  freePoolDelete: (id: number) => del<{ ok: boolean }>(`/llm/free-pool/accounts/${id}`),
+  freePoolActivate: (account_id?: number) =>
+    post<{ ok: boolean; activated: string; latency_ms: number }>("/llm/free-pool/activate", {
+      account_id: account_id ?? 0,
+    }),
+  freePoolToggle: (enabled: boolean) =>
+    post<{ ok: boolean; enabled?: boolean; activated?: string }>("/llm/free-pool/enabled", { enabled }),
   // 清除熔断，让下一次调用立刻重试该配置；不传 id = 全部清除。
   resetLLMPool: (id?: string) => post<LLMPoolStatus>("/llm/pool/reset", { id: id ? Number(id) : 0 }),
   // 全局重试策略（五层各自的次数+间隔）。全 0 = 全部走内置默认。
@@ -1396,3 +1414,4 @@ export const api = {
   credentials: (taskId?: string) =>
     get<{ items: Credential[] }>(`/credentials${taskQuery(taskId)}`).then((r) => arr(r.items)),
 };
+

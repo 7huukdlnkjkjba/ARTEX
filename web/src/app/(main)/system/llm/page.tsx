@@ -17,6 +17,7 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,7 +28,15 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import type { LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
+import type {
+  FreePoolAccount,
+  FreePoolData,
+  FreePoolProbeResult,
+  LLMPoolMember,
+  LLMPoolStatus,
+  LLMProfile,
+  LLMRetryOverride,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
@@ -98,6 +107,13 @@ const PROVIDER_PRESETS: {
     model: "gpt-4o",
   },
 ];
+
+// Chat2API（https://github.com/xiaoY233/Chat2API）是本地聚合代理桌面端：把
+// DeepSeek / GLM / Kimi / MiniMax / Qwen / Z.ai 等网页账号转成 OpenAI 兼容接口，
+// 0 成本复用已有账号。默认代理端口 8080，属于本地端点，API Key 可以留空。
+// 端口与模型名都可在 Chat2API 里改，这里的值只是把最常见的一套装进表单。
+const CHAT2API_BASE_URL = "http://127.0.0.1:8080/v1";
+const CHAT2API_DEFAULT_MODEL = "deepseek-v4-pro";
 
 function cooldownText(secs: number) {
   if (secs <= 0) return "";
@@ -356,7 +372,266 @@ function PoolSheet({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 模型配置抽屉（新建 / 编辑共用同一套表单）
+// 内置免费模型池卡片
+// ─────────────────────────────────────────────────────────────────────────────
+// 池成员就是普通 LLM 配置（server/freepool.go 建/删），这里只做展示、检测、
+// 一键激活和添加账号。启用 = 探测可用源 + 激活第一个能回话的 + 打开故障转移。
+function FreePoolCard({ onChanged }: { onChanged: () => void }) {
+  const [data, setData] = React.useState<FreePoolData | null>(null);
+  const [probe, setProbe] = React.useState<Record<number, FreePoolProbeResult>>({});
+  const [busy, setBusy] = React.useState(false);
+  const [probing, setProbing] = React.useState(false);
+  const [addOpen, setAddOpen] = React.useState(false);
+  const [adding, setAdding] = React.useState(false);
+  const [sourceKey, setSourceKey] = React.useState("openrouter");
+  const [label, setLabel] = React.useState("");
+  const [apiKey, setApiKey] = React.useState("");
+  const [model, setModel] = React.useState("");
+
+  const load = React.useCallback(async () => {
+    try {
+      setData(await api.freePool());
+    } catch {
+      /* 池接口不可用时卡片整体不渲染，不打扰模型配置页 */
+    }
+  }, []);
+
+  const runProbe = React.useCallback(async () => {
+    setProbing(true);
+    try {
+      const r = await api.freePoolProbe();
+      const m: Record<number, FreePoolProbeResult> = {};
+      for (const it of r.results) m[it.account_id] = it;
+      setProbe(m);
+    } catch (e) {
+      toast.error(`检测失败：${(e as Error).message}`);
+    } finally {
+      setProbing(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void (async () => {
+      await load();
+      await runProbe();
+    })();
+  }, [load, runProbe]);
+
+  async function toggle(on: boolean) {
+    setBusy(true);
+    try {
+      const r = await api.freePoolToggle(on);
+      if (on) toast.success(`免费池已启用${r.activated ? `：${r.activated}` : ""}`);
+      else toast.info("免费池已关闭（当前激活配置保持不变）");
+      await load();
+      onChanged();
+    } catch (e) {
+      toast.error(`操作失败：${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function activate(id: number) {
+    setBusy(true);
+    try {
+      const r = await api.freePoolActivate(id);
+      toast.success(`已激活：${r.activated} · ${r.latency_ms}ms`);
+      await load();
+      onChanged();
+    } catch (e) {
+      toast.error(`激活失败：${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(a: FreePoolAccount) {
+    setBusy(true);
+    try {
+      await api.freePoolDelete(a.id);
+      toast.success(`已移出免费池：${a.profile_name}`);
+      await load();
+      onChanged();
+    } catch (e) {
+      toast.error(`移除失败：${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitAdd() {
+    if (adding) return;
+    setAdding(true);
+    try {
+      await api.freePoolAdd({ source: sourceKey, label: label.trim(), api_key: apiKey.trim(), model: model.trim() });
+      toast.success("已添加免费账号");
+      setAddOpen(false);
+      setLabel("");
+      setApiKey("");
+      setModel("");
+      await load();
+      await runProbe();
+      onChanged();
+    } catch (e) {
+      toast.error(`添加失败：${(e as Error).message}`);
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  if (!data) return null;
+  const accounts = data.accounts ?? [];
+  const selected = data.sources.find((s) => s.key === sourceKey);
+
+  return (
+    <Card className="gap-0 py-4">
+      <CardContent className="grid gap-3 px-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <ZapIcon className="size-4 text-emerald-500" />
+          <span className="text-sm font-medium">内置免费模型池</span>
+          <Badge variant="outline" className="border-emerald-500/50 px-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+            0 成本
+          </Badge>
+          <span className="text-muted-foreground text-xs">
+            {accounts.length} 个来源 · 启用后自动挑可用源并走故障转移
+          </span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="ghost" disabled={probing || busy} onClick={() => void runProbe()}>
+              {probing ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />} 检测
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
+              <PlusIcon /> 添加账号
+            </Button>
+            <Switch
+              checked={data.enabled}
+              disabled={busy}
+              onCheckedChange={(v) => void toggle(v)}
+              aria-label="启用内置免费模型池"
+            />
+          </div>
+        </div>
+
+        <div className="grid gap-2">
+          {accounts.map((a) => {
+            const pr = probe[a.id];
+            const state = pr ? (pr.ok ? "online" : "down") : "unknown";
+            return (
+              <div
+                key={a.id}
+                className={cn(
+                  "flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border px-2.5 py-2 text-sm",
+                  a.is_default && "border-emerald-500/50 bg-emerald-500/5",
+                )}
+              >
+                <span
+                  className={cn(
+                    "size-2 shrink-0 rounded-full",
+                    state === "online" && "bg-emerald-500",
+                    state === "down" && "bg-destructive",
+                    state === "unknown" && "bg-muted-foreground/40",
+                  )}
+                  title={pr?.error ?? (pr?.ok ? "可用" : "未检测")}
+                />
+                <span className="font-medium">{a.source_name}</span>
+                {a.label && <span className="text-muted-foreground text-xs">（{a.label}）</span>}
+                <code className="text-muted-foreground truncate font-mono text-xs">{a.model}</code>
+                {a.keyless && <Badge variant="outline" className="px-1 text-[10px]">免 Key</Badge>}
+                {a.tools && <Badge variant="outline" className="px-1 text-[10px]">tools</Badge>}
+                {a.is_default && <Badge variant="outline" className="border-amber-400/50 px-1 text-[10px] text-amber-500">激活</Badge>}
+                <span className="text-muted-foreground text-xs">
+                  今日 {a.calls_today} 次{a.fails_today > 0 ? ` / 失败 ${a.fails_today}` : ""}
+                  {pr?.ok ? ` · ${pr.latency_ms}ms` : ""}
+                </span>
+                <div className="ml-auto flex items-center gap-1">
+                  <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={busy || a.is_default} onClick={() => void activate(a.id)}>
+                    {a.is_default ? "已激活" : "设为激活"}
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="size-7"
+                    title="移出免费池（同时删除该 LLM 配置）"
+                    disabled={busy || a.is_default}
+                    onClick={() => void remove(a)}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <p className="text-muted-foreground text-xs">
+          免 Key 来源（Pollinations）首次启动自动入池，匿名档限 1 次/45 秒，适合兜底；OpenRouter / Groq /
+          Gemini 的免费档用你自己的 Key 添加，额度更好。启用会打开「轮询配置」的故障转移：当前来源被限流或报错时
+          自动换下一个池成员，不会把任务卡死。
+        </p>
+      </CardContent>
+
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>添加免费账号</DialogTitle>
+            <DialogDescription>免 Key 来源直接添加；免费档需要填落地商自己的 Key。</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="grid gap-1.5">
+              <Label>来源</Label>
+              <Select value={sourceKey} onValueChange={setSourceKey}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {data.sources.map((s) => (
+                    <SelectItem key={s.key} value={s.key}>
+                      {s.name}
+                      {s.keyless ? "（免 Key）" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label>备注（可选）</Label>
+              <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="如：工作号 / key1" />
+            </div>
+            <div className="grid gap-1.5">
+              <Label>{selected?.keyless ? "API Key（可留空）" : "API Key"}</Label>
+              <Input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={
+                  selected?.keyless ? "免 Key 来源可留空；Pollinations 填 pollen key 可提额" : "sk-…"
+                }
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label>模型（可选）</Label>
+              <Input
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={selected?.models?.[0] ?? ""}
+              />
+            </div>
+            {selected && <p className="text-muted-foreground text-xs">{selected.note}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAddOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void submitAdd()} disabled={adding}>
+              {adding && <Loader2Icon className="animate-spin" />} 添加
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ProfileSheet({
@@ -490,6 +765,18 @@ function ProfileSheet({
     setBaseUrl(p.baseUrl);
     setModel(p.model);
     toast.info(`已填入 ${p.label} 官方端点与常用模型，可点右侧刷新按钮加载模型列表确认`);
+  }
+
+  /** One-click Chat2API: local free model source, OpenAI wire format, key optional. */
+  function applyChat2APIPreset() {
+    setFormat("openai");
+    setBaseUrl(CHAT2API_BASE_URL);
+    if (!name.trim()) setName("Chat2API 免费模型");
+    if (!model.trim()) setModel(CHAT2API_DEFAULT_MODEL);
+    toast.info(
+      "已填入 Chat2API 端点（默认 http://127.0.0.1:8080/v1）。先启动 Chat2API 并登录至少一个供应商账号，" +
+        "再点模型右侧刷新按钮从 /models 拉取；Key 可留空，端口/模型名以 Chat2API 设置为准",
+    );
   }
 
   async function save() {
@@ -654,6 +941,22 @@ function ProfileSheet({
                 </Button>
               ))}
             </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-muted-foreground text-xs">免费模型源：</span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs"
+                title={`Chat2API 本地代理（默认 ${CHAT2API_BASE_URL}）：把网页账号转成 OpenAI 兼容接口，0 成本`}
+                onClick={applyChat2APIPreset}
+              >
+                Chat2API
+                <Badge variant="outline" className="border-emerald-500/50 px-1 text-[10px] text-emerald-600">
+                  免费
+                </Badge>
+              </Button>
+            </div>
             <div className="flex flex-wrap gap-1.5">
               <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => applyLocalPreset("http://127.0.0.1:11434/v1", "qwen2.5:7b")}>
                 Ollama
@@ -671,6 +974,12 @@ function ProfileSheet({
             <p className="text-muted-foreground text-xs">
               本地/LAN 端点（localhost、127.0.0.1、10/172.16–31/192.168、*.local、compose 服务名）可以留空 Key；
               模型需要支持 OpenAI tool calling（qwen2.5、llama3.1+ 等）。
+            </p>
+            <p className="text-muted-foreground text-xs">
+              <b>Chat2API 免费源（内置）</b>：后端启动时会自动建好「Chat2API（免费）」配置（默认{" "}
+              <code>{CHAT2API_BASE_URL}</code>，不会自动激活），启动 Chat2API 桌面端并登录账号后直接设为激活即可；
+              也可以在这里点「Chat2API」新建一条。模型名用 Chat2API 里映射的名称（如 <code>deepseek-v4-pro</code>、
+              <code>glm-5.1</code>），同机运行 Key 可留空，跨机/开启鉴权时填 Chat2API 生成的 <code>sk-</code> Key。
             </p>
             <p className="text-muted-foreground text-xs">
               Anthropic 格式留空 Base URL 时会默认请求 <code>api.anthropic.com</code>。使用 DeepSeek 等第三方
@@ -1001,6 +1310,8 @@ export default function LLMPage() {
         </div>
       </div>
 
+      <FreePoolCard onChanged={() => void load()} />
+
       <Tabs defaultValue="profiles" className="flex-1">
         <TabsList>
           <TabsTrigger value="profiles">模型配置</TabsTrigger>
@@ -1113,3 +1424,4 @@ export default function LLMPage() {
     </div>
   );
 }
+

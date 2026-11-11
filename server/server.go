@@ -297,6 +297,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()
+		s.seedChat2APIProfile()  // 内置 Chat2API 免费模型源(仅建一次,不自动激活)
+		s.ensureFreePoolSeed()   // 内置免费模型池(免 Key 来源首次自动入池)
 		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
 	}
 	// precedence: persisted DB config > env.
@@ -454,6 +456,52 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 		return err
 	}
 	return s.m.pg.SetActiveProfile(newID)
+}
+
+// Chat2API (https://github.com/xiaoY233/Chat2API) is a local desktop aggregator
+// that republishes web-account quotas as an OpenAI-compatible endpoint. It is
+// seeded as a built-in profile so a fresh install can switch it on without
+// typing a base URL; it is never auto-activated because the proxy only answers
+// while the Chat2API app is running.
+const (
+	chat2apiProfileName    = "Chat2API（免费）"
+	chat2apiBaseURL        = "http://127.0.0.1:8080/v1"
+	chat2apiDefaultModel   = "deepseek-v4-pro"
+	chat2apiContextWindowK = 128
+)
+
+// seedChat2APIProfile inserts the built-in Chat2API free profile once. An
+// existing row wins (the operator may have edited or deleted it), so this is
+// idempotent and never overwrites user data.
+func (s *Server) seedChat2APIProfile() {
+	if s.m.pg == nil {
+		return
+	}
+	profs, err := s.m.pg.ListProfiles()
+	if err != nil {
+		log.Printf("[llm] seed Chat2API profile: list: %v", err)
+		return
+	}
+	for _, p := range profs {
+		if p.Name == chat2apiProfileName {
+			return
+		}
+	}
+	if _, err := s.m.pg.SaveProfile(&db.LLMProfile{
+		Name:           chat2apiProfileName,
+		Format:         "openai",
+		Model:          chat2apiDefaultModel,
+		BaseURL:        chat2apiBaseURL,
+		APIKeyHint:     "本地代理，无需 Key",
+		ContextWindowK: chat2apiContextWindowK,
+		Streaming:      true,
+		// 默认不进故障转移链：Chat2API 没开时不该被轮询选中，想用就显式激活。
+		PoolExclude: true,
+	}); err != nil {
+		log.Printf("[llm] seed Chat2API profile: %v", err)
+		return
+	}
+	log.Printf("[llm] 已内置 Chat2API 免费模型源（%s）；启动 Chat2API 后在 LLM 配置里「设为激活」即可", chat2apiBaseURL)
 }
 
 // reapplyActiveProfile hot-reloads the engine from the active DB profile so that
@@ -993,6 +1041,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/visibility/skill/toggle", s.pgToggleSkillVisibility)
 	// LLM 多 profile
 	mux.HandleFunc("GET /api/llm/profiles", s.pgListProfiles)
+	// 内置免费模型池：成员是普通 llm_profiles，池只负责建/删账号与健康探测。
+	mux.HandleFunc("GET /api/llm/free-pool", s.pgFreePool)
+	mux.HandleFunc("POST /api/llm/free-pool/probe", s.pgFreePoolProbe)
+	mux.HandleFunc("POST /api/llm/free-pool/accounts", s.pgFreePoolAdd)
+	mux.HandleFunc("DELETE /api/llm/free-pool/accounts/{id}", s.pgFreePoolDelete)
+	mux.HandleFunc("POST /api/llm/free-pool/activate", s.pgFreePoolActivate)
+	mux.HandleFunc("POST /api/llm/free-pool/enabled", s.pgFreePoolToggle)
 	mux.HandleFunc("POST /api/llm/profiles", s.pgSaveProfile)
 	mux.HandleFunc("DELETE /api/llm/profiles/{id}", s.pgDeleteProfile)
 	mux.HandleFunc("POST /api/llm/profiles/active", s.pgActivateProfile)

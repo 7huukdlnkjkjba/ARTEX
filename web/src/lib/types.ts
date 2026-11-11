@@ -1131,6 +1131,53 @@ export interface LLMPoolStatus {
   chain: LLMPoolMember[];
 }
 
+// ---- 内置免费模型池 ----
+// 每个成员是一个普通 LLM 配置（openai 兼容），由 server/freepool.go 维护。
+export interface FreePoolSource {
+  key: string;
+  name: string;
+  base_url: string;
+  models: string[];
+  keyless: boolean; // true = 免 Key（首次启动自动入池）
+  tools: boolean; // 是否支持 OpenAI tool calling
+  docs_url: string;
+  note: string;
+  rps: number;
+  rpm: number;
+  context_k: number;
+}
+
+export interface FreePoolAccount {
+  id: number;
+  source: string;
+  source_name: string;
+  label: string;
+  profile_id: number;
+  profile_name: string;
+  model: string;
+  base_url: string;
+  api_key_hint?: string;
+  keyless: boolean;
+  tools: boolean;
+  is_default: boolean;
+  calls_today: number;
+  fails_today: number;
+}
+
+export interface FreePoolData {
+  enabled: boolean;
+  active_profile_id?: string;
+  sources: FreePoolSource[];
+  accounts: FreePoolAccount[];
+}
+
+export interface FreePoolProbeResult {
+  account_id: number;
+  ok: boolean;
+  latency_ms?: number;
+  error?: string;
+}
+
 // ---- Agents ----
 export interface Agent {
   id: string;

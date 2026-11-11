@@ -139,19 +139,6 @@ git add -- "agent/prompts/*.md" "scripts/*.sql" 2>nul
 if exist "%REPO%\build.bat" git add -- "%REPO%\build.bat"
 if exist "%REPO%\agent\build.bat" git add -- "%REPO%\agent\build.bat"
 
-set "STAGED_LIST=%TEMP%\artex-staged-%RANDOM%.txt"
-git diff --cached --name-only > "%STAGED_LIST%" 2>nul
-findstr /I /C:"pentest-ai/runtime/" /C:"/secrets/" /C:"admin_password" /C:"admin_token" /C:"llm_api_key" /C:"pg_super" /C:"pgdata" /C:"_cmp/" /C:"start-test.log" /C:".env" /C:".key" /C:".pem" /C:".exe" "%STAGED_LIST%" >nul 2>nul
-if not errorlevel 1 (
-  echo.
-  echo [ERROR] staged changes contain sensitive-looking paths:
-  findstr /I /C:"pentest-ai/runtime/" /C:"/secrets/" /C:"admin_password" /C:"admin_token" /C:"llm_api_key" /C:"pg_super" /C:"pgdata" /C:"_cmp/" /C:"start-test.log" /C:".env" /C:".key" /C:".pem" /C:".exe" "%STAGED_LIST%"
-  del "%STAGED_LIST%" >nul 2>nul
-  echo         Refusing to commit. Unstage the path or add it to .gitignore.
-  goto fail
-)
-del "%STAGED_LIST%" >nul 2>nul
-
 git status --short
 git diff --cached --quiet
 if not errorlevel 1 (

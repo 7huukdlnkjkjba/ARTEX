@@ -330,10 +330,12 @@ func IsLocalEndpoint(baseURL string) bool {
 }
 
 // normalizeProviderAlias maps the names an operator naturally types for a local
-// server onto the OpenAI-compatible wire format ARTEX already speaks.
+// server onto the OpenAI-compatible wire format ARTEX already speaks. Chat2API
+// is a local aggregator that exposes an OpenAI-compatible endpoint, so it is
+// treated exactly like the other local servers.
 func normalizeProviderAlias(p string) string {
 	switch strings.ToLower(strings.TrimSpace(p)) {
-	case "ollama", "local", "lmstudio", "lm-studio", "llamacpp", "llama.cpp", "vllm", "openai-compatible", "openai_compatible":
+	case "ollama", "local", "lmstudio", "lm-studio", "llamacpp", "llama.cpp", "vllm", "openai-compatible", "openai_compatible", "chat2api", "chat2api-local":
 		return "openai"
 	}
 	return strings.TrimSpace(p)

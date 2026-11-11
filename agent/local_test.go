@@ -44,7 +44,7 @@ func TestIsLocalEndpoint(t *testing.T) {
 }
 
 func TestConfigFromLocalAliases(t *testing.T) {
-	for _, provider := range []string{"ollama", "local", "lmstudio", "vllm", "openai-compatible"} {
+	for _, provider := range []string{"ollama", "local", "lmstudio", "vllm", "openai-compatible", "chat2api"} {
 		c := ConfigFrom(provider, "qwen2.5:7b", "http://127.0.0.1:11434/v1", "", "")
 		if c.Format != llm.FormatOpenAI {
 			t.Fatalf("%s: format = %v, want openai", provider, c.Format)
@@ -87,6 +87,31 @@ func TestFromEnvLocalWithoutKey(t *testing.T) {
 	}
 	if _, err := c.NewProvider(); err != nil {
 		t.Fatalf("NewProvider: %v", err)
+	}
+}
+
+func TestFromEnvChat2APIWithoutKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ARTEX_LLM_PROVIDER", "chat2api")
+	t.Setenv("ARTEX_LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+	t.Setenv("ARTEX_LLM_MODEL", "deepseek-v4-pro")
+
+	c, ok := FromEnv()
+	if !ok {
+		t.Fatal("Chat2API local endpoint without key should be accepted")
+	}
+	if c.Provider() != "openai" {
+		t.Fatalf("provider = %s, want openai", c.Provider())
+	}
+	if !c.KeyOptional() {
+		t.Fatal("Chat2API local endpoint must allow an empty key")
+	}
+	if c.EffectiveKey() != "local" {
+		t.Fatalf("effective key = %q, want local", c.EffectiveKey())
+	}
+	if c.Model != "deepseek-v4-pro" {
+		t.Fatalf("model = %s", c.Model)
 	}
 }
 
