@@ -9,6 +9,7 @@ if exist "%~dp0go.mod" (
 )
 if errorlevel 1 (
   echo [ERROR] cannot enter repository root from %~dp0
+  pause
   exit /b 1
 )
 set "REPO=%CD%"
@@ -16,6 +17,7 @@ set "REPO=%CD%"
 if not exist "%REPO%\go.mod" (
   echo [ERROR] go.mod not found under %REPO%
   popd
+  pause
   exit /b 1
 )
 
@@ -24,7 +26,7 @@ set "DO_TEST=0"
 set "DO_COMMIT=1"
 set "DO_PUSH=1"
 set "EDIT_README=0"
-set "DO_PAUSE=0"
+set "DO_PAUSE=1"
 
 :parse_args
 if "%~1"=="" goto args_done
@@ -56,6 +58,11 @@ if /I "%~1"=="--edit-readme" (
 )
 if /I "%~1"=="--pause" (
   set "DO_PAUSE=1"
+  shift
+  goto parse_args
+)
+if /I "%~1"=="--no-pause" (
+  set "DO_PAUSE=0"
   shift
   goto parse_args
 )
@@ -148,8 +155,8 @@ if not errorlevel 1 (
 )
 
 echo [4/4] git commit
-echo [OK] 提交成功
 git commit -m "%COMMIT_MSG%" || goto commit_fail
+echo [OK] 提交成功
 
 if "%DO_PUSH%"=="0" (
   echo [done] committed locally; push skipped by --no-push.
@@ -181,7 +188,7 @@ if errorlevel 1 (
   echo [ERROR] push failed while catching up ahead commits.
   goto :eof
 )
-echo [done] caught up %AHEAD% commit^(s^) to origin/%BRANCH%.
+echo [done] caught up %AHEAD% commit^(s) to origin/%BRANCH%.
 goto :eof
 
 :usage
@@ -194,11 +201,13 @@ echo   --test          run go test ./agent after building
 echo   --no-commit     build only; do not stage/commit/push
 echo   --no-push       commit locally, do not push
 echo   --edit-readme   open README.md in Notepad before staging
-echo   --pause         pause at the end
+echo   --pause         pause at the end (default)
+echo   --no-pause      do NOT pause at the end (for CI)
 echo   --help          show this help
 echo.
 echo Default commit message: chore: build %%DATE%% %%TIME%%
 popd
+if "%DO_PAUSE%"=="1" pause
 endlocal
 exit /b 0
 
