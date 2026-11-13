@@ -518,6 +518,10 @@ func (s *Server) seedOrchestrationTools() {
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingWorkflowTools()
+	// 最后统一对齐一次“代码里的内置提示词默认值”:上面那些一次性 reseed 都靠 flag
+	// 守卫,漏一次升级就让旧库永远停在老正文(2026-11 的 worker 就是 3 周前的版本)。
+	// 只升级 note 仍是内置默认的版本,用户改过的一律不碰。
+	syncBuiltinPrompts(s.m.pg)
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。

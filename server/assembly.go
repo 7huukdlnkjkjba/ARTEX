@@ -204,6 +204,68 @@ func seedPrompts(pg *db.DB) {
 	}
 }
 
+// builtinPromptNote reports whether a prompt version was written by the code
+// (seed / restore-to-default) rather than by a user edit. Only these may be
+// auto-upgraded; anything else is treated as the user's own work.
+func builtinPromptNote(note string) bool {
+	n := strings.TrimSpace(note)
+	return n == "内置默认" || n == "恢复为内置默认"
+}
+
+// syncBuiltinPrompts upgrades stored built-in prompts to the code's CURRENT
+// default when the active version is still code-owned. This closes a real gap:
+// SeedPromptIfEmpty is first-insert-only and every historical refinement needed
+// its own hand-written reseed function + settings flag, so an existing install
+// silently kept running month-old prompt bodies forever. The 2026-11 DB was
+// exactly that: worker v1 from 2026-10-12 (1155 chars) while agent/worker.go's
+// current default was materially different — the operator kept editing prompts
+// that never reached the model.
+//
+// User-edited prompts (any other note) are never touched; the log line tells the
+// operator that a newer default exists and can be applied via "恢复为内置默认".
+// Idempotent: once current == default it does nothing on later startups.
+func syncBuiltinPrompts(pg *db.DB) {
+	for key, tmpl := range agent.BuiltinPromptSeeds() {
+		syncBuiltinPrompt(pg, key, tmpl)
+	}
+}
+
+// syncBuiltinPrompt is the per-agent unit of syncBuiltinPrompts. Split out so it
+// can be tested against a throwaway agent without touching the built-in ones.
+func syncBuiltinPrompt(pg *db.DB, key, tmpl string) {
+	if strings.TrimSpace(tmpl) == "" {
+		return
+	}
+	a, err := pg.GetAgentByKey(key)
+	if err != nil || a == nil {
+		return
+	}
+	text, note, ver, err := pg.CurrentPromptMeta(a.ID)
+	if err != nil {
+		log.Printf("[prompts] sync %s 读取当前版本失败: %v", key, err)
+		return
+	}
+	if text == "" {
+		if err := pg.SeedPromptIfEmpty(a.ID, tmpl); err != nil {
+			log.Printf("[prompts] sync %s 首次播种失败: %v", key, err)
+		}
+		return
+	}
+	if text == tmpl {
+		return // already current
+	}
+	if !builtinPromptNote(note) {
+		log.Printf("[prompts] %s 是用户自定义提示词(v%d, note=%q),不覆盖;代码里有更新的默认,需要时可点“恢复为内置默认”", key, ver, note)
+		return
+	}
+	nv, err := pg.ResetPromptToDefault(a.ID, tmpl)
+	if err != nil {
+		log.Printf("[prompts] %s 自动升级失败: %v", key, err)
+		return
+	}
+	log.Printf("[prompts] %s 内置提示词已自动升级到代码最新默认(v%d -> v%d)", key, ver, nv)
+}
+
 // wireTools seeds the built-in tool catalog (idempotent, first-insert only so page
 // edits survive restart) and wires the DB tools table into the agent runtime: at
 // tool-assembly time each built-in tool is filtered by its agent binding / enabled
@@ -330,6 +392,13 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				}
 			}
 		}
+		// Bash 在 Windows 上实际是 Windows PowerShell 5.1,但工具名/说明是 bash 语义,
+		// 模型照着写 `&&` 会反复吃 ParserError(2026-11 transcript 里连试 6 次)。
+		// 说明必须由代码追加,DB 覆盖描述也删不掉。
+		out = agent.ApplyBashPlatformNote(out)
+		// 工具路由闸门:对“有专用工具却仍手搓”的高置信度 Bash 命令直接拒绝并指路。
+		// 替代工具不在本 agent 的最终列表里时自动不生效,不会造成死路。
+		out = agent.ApplyToolchainGate(out)
 		return out
 	}
 }

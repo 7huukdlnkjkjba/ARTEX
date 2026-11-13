@@ -409,6 +409,10 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 工具名清洗:网关/模型模板漏出的 <|channel|> 等特殊 token 会污染 function name,
+	// 变成 unknown tool,再被模型解读成“工具不可靠”。这一层只改名字、不改参数。
+	// 放在墙钟之内、SDK 适配层之外,Stream/Complete 两条路径都覆盖。
+	prov = withToolNameSanitizer(prov)
 	// 整体墙钟(ARTEX_LLM_CALL_TIMEOUT):单次调用的最上层保险,防连接半开挂死冻住
 	// worker/planner。包在这里(组装处),recorder/pool 都在它之外,归一化错误可被
 	// llm_usage 记录并触发 llmpool 故障转移。0 = 不限,原样返回。

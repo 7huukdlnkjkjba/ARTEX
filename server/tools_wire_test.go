@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Autumn-27/artex/agent"
@@ -30,7 +31,11 @@ func TestWireTools(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer pg.Close()
+	// Register close as a cleanup, not a defer: t.Cleanup functions run LIFO AFTER
+	// the test body, while a defer would close the pool BEFORE the restore cleanup
+	// below and make that restore silently fail (how the dev DB got stuck on
+	// "EDITED DESC" once).
+	t.Cleanup(func() { _ = pg.Close() })
 
 	wireTools(pg, nil) // nil domainReg: test only covers filter/decoration, not injection
 	t.Cleanup(func() { agent.ToolResolve = nil })
@@ -56,13 +61,30 @@ func TestWireTools(t *testing.T) {
 	if _, ok := worker["record_fact"]; !ok {
 		t.Error("worker lost record_fact")
 	}
-	// SDK generic tools aren't seeded → ToolResolve passes them through unchanged
-	// (same object, original description — not decorated). No startup prune touches
-	// non-catalog rows, so future user-defined custom tools survive too.
+	// SDK generic tools aren't seeded → ToolResolve passes them through, but Bash
+	// now carries two code-owned additions: the real-shell note (Windows only) and
+	// the toolchain gate (worker has recon_http etc.). Assert the gate is present
+	// and the original behavior is preserved.
 	if bash, ok := worker["Bash"]; !ok {
-		t.Error("worker lost Bash (should pass through)")
-	} else if bash.Description() != actool.NewBash().Description() {
-		t.Error("Bash should pass through undecorated, but description changed")
+		t.Error("worker lost Bash (should be kept)")
+	} else {
+		if !strings.Contains(bash.Description(), "工具闸门") {
+			t.Errorf("Bash should carry the toolchain gate note, got %q", bash.Description())
+		}
+		props, _ := bash.InputSchema()["properties"].(map[string]any)
+		if _, ok := props["override_reason"]; !ok {
+			t.Error("gated Bash must advertise override_reason")
+		}
+		// End-to-end enforcement: a hand-rolled curl must be refused by the
+		// resolved tool, naming the platform replacement. This is the behavior
+		// that turns "tools exist but are never called" into "use the tool".
+		res, err := bash.Call(ctx, json.RawMessage(`{"command":"curl -s http://example.com/"}`), nil)
+		if err != nil {
+			t.Fatalf("Bash call returned go error: %v", err)
+		}
+		if !res.IsError || !strings.Contains(res.Flatten(), "recon_http") {
+			t.Fatalf("curl should be routed to recon_http, got isError=%v %q", res.IsError, res.Flatten())
+		}
 	}
 	// planner is not bound to record_fact → resolving a base that contains it drops it.
 	planner := names(agent.ToolResolve(ctx, "planner", base))
@@ -71,8 +93,18 @@ func TestWireTools(t *testing.T) {
 	}
 
 	// Edit description + add a default to a scalar param, then confirm the resolved
-	// worker tool reflects both. Restore from code default on cleanup.
-	t.Cleanup(func() { _ = pg.UpsertToolForce(rf.Key, rf.Description, rf.Schema, mustJSON(rf.Agents)) })
+	// worker tool reflects both. Restore the CODE default afterwards (not the
+	// pre-test snapshot: if a previous interrupted run left this row dirty, the
+	// snapshot would faithfully preserve the dirt).
+	t.Cleanup(func() {
+		for _, s := range agent.BuiltinToolSeeds() {
+			if s.Key == rf.Key {
+				schema, _ := json.Marshal(s.Schema)
+				agents, _ := json.Marshal(s.Agents)
+				_ = pg.UpsertToolForce(s.Key, s.Desc, schema, agents)
+			}
+		}
+	})
 	var schema map[string]any
 	_ = json.Unmarshal(rf.Schema, &schema)
 	if props, ok := schema["properties"].(map[string]any); ok {

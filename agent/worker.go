@@ -329,6 +329,8 @@ const workerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 2. **穷尽这条意图内的手段再下结论**。初次受阻（payload 被过滤 / 404 / 注入无回显）不代表已探透——换编码/方法/参数/路径把本意图的合理手段走完再判定；但穷尽只限【本意图内部】，绝不外扩去做别的意图。真正探透、或合理手段已走完后立即写回并返回；别因"总目标未达成"继续，也别为凑步数在已探尽的方向空转。
 3. 只在授权范围内操作。系统提示顶部若附【操作约束】，那是最高优先级红线：每条命令/探测执行前先自检，违反即不做（哪怕它落在你领到的意图里）。
 
+**先选工具再动手**：本意图涉及 HTTP 请求 / 端口 / 路径 / 鉴权 / 前端 JS 审计 / SQLi / 模板扫描时，直接调用系统提示顶部“工具优先”里对应的专用工具——它们会走任务代理、写观察台账、可被 report_finding_gated 引用。Bash 只用于专用工具表达不了的动作；被闸门拦下时按提示换工具，确需原生命令再补 override_reason。
+
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
 - **新资产/资源 → insert_assets（资产图）**：子域 / service / endpoint / 指纹 / 凭据 等一切资产【本身】。**这里只登记资产；探索结论/判断不写这里，用 record_fact。**
 - **探索结论/事实 → record_fact（探索图，传 intent_id）**：都用它。**多个观察汇总成【一条】事实**（summary 一句总结 + detail写对总结的拓展，依靠真实的执行过程），不要一个属性一条、一意图通常只一条，拆碎会让图谱无限膨胀——**默认就写一条，能并进 detail 的都并进去**；仅当确有【彼此完全独立、无法归并】的结论时才用 facts 数组分条，这是极少数例外，不是常规。**只写增量**：只记这次【新得到】的，别把已有事实换措辞重记（只印证已有、无新增就不必记）。**只写真实看到的**：给 evidence（一行：命令+最能证明的一两行输出，简洁，细节在 detail）、标 confidence（observed=直接看到 / inferred=据现象推断）。
@@ -415,7 +417,11 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string, intranet bool) stri
 	// Optional finding guidance is added for every role after tool resolution.
 	// workerAntiTrapRules(批 5 B1 反 AI 蜜罐红线)对内外网 worker 一律追加,
 	// 内网红线尾仍只在 intranet 时生效。
-	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir) + untrustedDataRule + evidenceFirstRule + toolchainRule + chainskel.WorkerMetaRules + workerAntiTrapRules + tail
+	//
+	// ToolRoutingHeader 是代码固定的【首段】:工具路由必须出现在角色正文之前。
+	// 2026-11 实测:同样的纪律只放在系统提示尾部时,专用工具调用数为 0,Bash 占
+	// 全部工具调用的 72%——位置本身就是提示词效果的一部分。
+	return ToolRoutingHeader + body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir) + untrustedDataRule + evidenceFirstRule + toolchainRule + chainskel.WorkerMetaRules + workerAntiTrapRules + tail
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
@@ -558,6 +564,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		}
 		// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
 		sysBody += renderIntentTask(intent)
+		// 本意图推荐工具:按意图关键词 + 本次真实可用的工具生成,紧贴意图块。
+		// 过滤掉未绑定/被禁用的工具,不产生 dangling 提示;无命中则整段不出现。
+		sysBody += ToolRoutingHint(intent.Payload, tools)
 		// L3 反问决策骨架:按意图 chain_tags(缺失时回退 summary 关键词匹配)注入对应
 		// 类别的"场景→判据→转向"骨架;至多 2 类、总字符 cap 8K,骨架缺失静默不注入。
 		sysBody += chainskel.ForIntent(intent.Payload)

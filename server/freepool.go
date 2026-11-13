@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,11 +48,36 @@ type freeSource struct {
 	RPS      float64  `json:"rps"` // 建议限速，0=不限
 	RPM      float64  `json:"rpm"`
 	ContextK int      `json:"context_k"`
+
+	// EnvKey is the environment variable that already carries the operator's key
+	// for this source, so an existing key is picked up without a UI round trip.
+	EnvKey string `json:"-"`
+	// Local marks a loopback endpoint: http is expected, and the source is seeded
+	// only when something is actually listening on it.
+	Local bool `json:"local,omitempty"`
 }
 
 // builtinFreeSources is the catalog. Order = activation preference.
+//
+// Every keyed entry is a vendor's own free tier: the operator brings their own
+// key (or has it exported in the environment), and the pool only stores that
+// key in its normal llm_profiles row. No shared or borrowed credentials.
 func builtinFreeSources() []freeSource {
 	return []freeSource{
+		{
+			Key:      "ollama",
+			Name:     "本地 Ollama",
+			BaseURL:  "http://127.0.0.1:11434/v1",
+			Models:   []string{"qwen2.5:7b"},
+			Keyless:  true,
+			Tools:    true,
+			DocsURL:  "https://ollama.com",
+			Note:     "本机模型，完全免费且不出网；装了 Ollama 并 ollama pull 模型后自动入池",
+			RPS:      0,
+			RPM:      0,
+			ContextK: 32,
+			Local:    true,
+		},
 		{
 			Key:      "pollinations",
 			Name:     "Pollinations",
@@ -75,6 +103,7 @@ func builtinFreeSources() []freeSource {
 			RPS:      0.5,
 			RPM:      30,
 			ContextK: 128,
+			EnvKey:   "OPENROUTER_API_KEY",
 		},
 		{
 			Key:      "groq",
@@ -88,6 +117,7 @@ func builtinFreeSources() []freeSource {
 			RPS:      0.5,
 			RPM:      30,
 			ContextK: 128,
+			EnvKey:   "GROQ_API_KEY",
 		},
 		{
 			Key:      "gemini",
@@ -101,6 +131,133 @@ func builtinFreeSources() []freeSource {
 			RPS:      1,
 			RPM:      30,
 			ContextK: 128,
+			EnvKey:   "GEMINI_API_KEY",
+		},
+		{
+			Key:      "cerebras",
+			Name:     "Cerebras",
+			BaseURL:  "https://api.cerebras.ai/v1",
+			Models:   []string{"llama-3.3-70b"},
+			Keyless:  false,
+			Tools:    true,
+			DocsURL:  "https://inference-docs.cerebras.ai",
+			Note:     "免费额度，需自备 Key；推理速度极快，适合工具调用回合",
+			RPS:      1,
+			RPM:      30,
+			ContextK: 128,
+			EnvKey:   "CEREBRAS_API_KEY",
+		},
+		{
+			Key:      "mistral",
+			Name:     "Mistral",
+			BaseURL:  "https://api.mistral.ai/v1",
+			Models:   []string{"mistral-small-latest"},
+			Keyless:  false,
+			Tools:    true,
+			DocsURL:  "https://docs.mistral.ai",
+			Note:     "免费 Experiment 档，需自备 Key；注意免费档的数据使用条款",
+			RPS:      1,
+			RPM:      60,
+			ContextK: 128,
+			EnvKey:   "MISTRAL_API_KEY",
+		},
+		{
+			Key:      "nvidia",
+			Name:     "NVIDIA NIM",
+			BaseURL:  "https://integrate.api.nvidia.com/v1",
+			Models:   []string{"meta/llama-3.3-70b-instruct"},
+			Keyless:  false,
+			Tools:    true,
+			DocsURL:  "https://build.nvidia.com",
+			Note:     "注册送免费额度，需自备 Key；模型多，适合当第二梯队",
+			RPS:      0.5,
+			RPM:      30,
+			ContextK: 128,
+			EnvKey:   "NVIDIA_API_KEY",
+		},
+		{
+			Key:      "github-models",
+			Name:     "GitHub Models",
+			BaseURL:  "https://models.github.ai/inference",
+			Models:   []string{"openai/gpt-4o-mini"},
+			Keyless:  false,
+			Tools:    true,
+			DocsURL:  "https://docs.github.com/en/github-models",
+			Note:     "用 GitHub PAT 当 Key，按账号给免费速率；额度小，适合轻量步骤",
+			RPS:      0.5,
+			RPM:      15,
+			ContextK: 128,
+			EnvKey:   "GITHUB_TOKEN",
+		},
+		{
+			Key:      "together",
+			Name:     "Together AI",
+			BaseURL:  "https://api.together.xyz/v1",
+			Models:   []string{"meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"},
+			Keyless:  false,
+			Tools:    true,
+			DocsURL:  "https://docs.together.ai",
+			Note:     "带 -Free 后缀的模型免费，需自备 Key；并发有限",
+			RPS:      0.5,
+			RPM:      30,
+			ContextK: 128,
+			EnvKey:   "TOGETHER_API_KEY",
+		},
+		{
+			Key:      "siliconflow",
+			Name:     "硅基流动 SiliconFlow",
+			BaseURL:  "https://api.siliconflow.cn/v1",
+			Models:   []string{"Qwen/Qwen2.5-7B-Instruct"},
+			Keyless:  false,
+			Tools:    true,
+			DocsURL:  "https://docs.siliconflow.cn",
+			Note:     "部分小模型免费，需自备 Key；国内直连，延迟低",
+			RPS:      1,
+			RPM:      60,
+			ContextK: 32,
+			EnvKey:   "SILICONFLOW_API_KEY",
+		},
+		{
+			Key:      "zai",
+			Name:     "智谱 Z.ai",
+			BaseURL:  "https://api.z.ai/api/paas/v4",
+			Models:   []string{"glm-4.5-flash"},
+			Keyless:  false,
+			Tools:    true,
+			DocsURL:  "https://docs.z.ai",
+			Note:     "GLM Flash 系列免费，需自备 Key；中文场景表现好",
+			RPS:      0.5,
+			RPM:      30,
+			ContextK: 128,
+			EnvKey:   "ZAI_API_KEY",
+		},
+		{
+			Key:      "modelscope",
+			Name:     "魔搭 ModelScope",
+			BaseURL:  "https://api-inference.modelscope.cn/v1",
+			Models:   []string{"Qwen/Qwen2.5-7B-Instruct"},
+			Keyless:  false,
+			Tools:    false,
+			DocsURL:  "https://modelscope.cn/docs",
+			Note:     "每日免费调用额度，需自备 Key；工具调用支持有限，适合纯推理步骤",
+			RPS:      0.5,
+			RPM:      30,
+			ContextK: 32,
+			EnvKey:   "MODELSCOPE_API_KEY",
+		},
+		{
+			Key:      "huggingface",
+			Name:     "Hugging Face",
+			BaseURL:  "https://router.huggingface.co/v1",
+			Models:   []string{"meta-llama/Llama-3.1-8B-Instruct"},
+			Keyless:  false,
+			Tools:    false,
+			DocsURL:  "https://huggingface.co/docs/inference-providers",
+			Note:     "每月免费额度，需自备 HF Token；工具调用支持有限",
+			RPS:      0.5,
+			RPM:      30,
+			ContextK: 32,
+			EnvKey:   "HF_TOKEN",
 		},
 	}
 }
@@ -250,7 +407,62 @@ func (s *Server) createFreePoolAccount(src freeSource, label, apiKey, model stri
 	return nil, fmt.Errorf("free pool account for profile %d not found after insert", profileID)
 }
 
-// ensureFreePoolSeed creates the keyless default member once per source.
+// normalizeBaseURL makes "https://x/v1/" and "https://X/v1" comparable, so a
+// pool source can find the operator's existing profile for the same endpoint.
+func normalizeBaseURL(raw string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(raw), "/"))
+}
+
+// sourceEnvKey returns the key that is already exported for this source. The
+// pool never ships credentials, but re-typing a key that is already in the
+// environment is pointless — vendored names are covered as aliases.
+func sourceEnvKey(src freeSource) string {
+	names := []string{src.EnvKey}
+	switch src.Key {
+	case "gemini":
+		names = append(names, "GOOGLE_API_KEY")
+	case "github-models":
+		names = append(names, "GITHUB_MODELS_TOKEN")
+	case "huggingface":
+		names = append(names, "HUGGING_FACE_HUB_TOKEN")
+	}
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// localEndpointUp reports whether something is actually listening on a loopback
+// source, so a machine without Ollama does not get a permanently dead pool member.
+func localEndpointUp(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	addr := u.Host
+	if !strings.Contains(addr, ":") {
+		if u.Scheme == "https" {
+			addr += ":443"
+		} else {
+			addr += ":80"
+		}
+	}
+	conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// ensureFreePoolSeed fills the pool once per source: reuse an existing profile
+// that already points at the same endpoint (so the operator's key is reused),
+// else create the member when the source is keyless or its key is exported.
 func (s *Server) ensureFreePoolSeed() {
 	if s.m.pg == nil {
 		return
@@ -264,31 +476,47 @@ func (s *Server) ensureFreePoolSeed() {
 	for _, a := range accounts {
 		have[a.Source] = true
 	}
+
+	// 已有配置优先复用：同一个 BaseURL 的普通 LLM 配置往往已经填过 Key，
+	// 免费池只补一条成员链接，不再让操作员在池子里重填一遍。
+	profiles, err := s.m.pg.ListProfiles()
+	if err != nil {
+		log.Printf("[free-pool] seed: profiles: %v", err)
+		profiles = nil
+	}
+	byBase := map[string]*db.LLMProfile{}
+	for _, p := range profiles {
+		if p.BaseURL != "" {
+			byBase[normalizeBaseURL(p.BaseURL)] = p
+		}
+	}
+
 	for _, src := range builtinFreeSources() {
-		if !src.Keyless || have[src.Key] {
+		if have[src.Key] {
 			continue
 		}
-		// 同名的普通配置（用户手工建的）优先复用，只补一条池链接，避免重复 profile。
-		if profs, err := s.m.pg.ListProfiles(); err == nil {
-			var reuse *db.LLMProfile
-			for _, p := range profs {
-				if p.Name == "免费池·"+src.Name && p.BaseURL == src.BaseURL {
-					reuse = p
-					break
-				}
+		if src.Local && !localEndpointUp(src.BaseURL) {
+			continue
+		}
+		if p, ok := byBase[normalizeBaseURL(src.BaseURL)]; ok && (src.Keyless || p.APIKey != "") {
+			if _, err := s.m.pg.AddFreePoolAccount(src.Key, "", p.ID); err != nil {
+				log.Printf("[free-pool] seed %s: link: %v", src.Key, err)
 			}
-			if reuse != nil {
-				if _, err := s.m.pg.AddFreePoolAccount(src.Key, "", reuse.ID); err != nil {
-					log.Printf("[free-pool] seed %s: link: %v", src.Key, err)
-				}
-				continue
+			continue
+		}
+		key := ""
+		if !src.Keyless {
+			key = sourceEnvKey(src)
+			if key == "" {
+				continue // 没有 Key 的付费档不占用池位，等操作员自己添加
 			}
 		}
-		if _, err := s.createFreePoolAccount(src, "", "", ""); err != nil {
+		acc, err := s.createFreePoolAccount(src, "", key, "")
+		if err != nil {
 			log.Printf("[free-pool] seed %s: %v", src.Key, err)
 			continue
 		}
-		log.Printf("[free-pool] 已内置免费来源 %s（%s / %s）", src.Name, src.BaseURL, src.Models[0])
+		log.Printf("[free-pool] 已接入免费来源 %s（%s / %s）", src.Name, src.BaseURL, acc.Model)
 	}
 }
 
@@ -421,6 +649,17 @@ func (s *Server) pgFreePoolDelete(w http.ResponseWriter, r *http.Request) {
 	profileID, err := s.m.pg.DeleteFreePoolAccount(id)
 	if err != nil {
 		writeErr(w, 404, "账号不存在")
+		return
+	}
+	// 池子会复用操作员「同一个端点」的既有配置（例如他早就配好的 OpenRouter），
+	// 那种 profile 不是池子建的，移出池子时只摘链接，不能连人家的配置一起删。
+	prof, perr := s.m.pg.ProfileByID(profileID)
+	if perr != nil || prof == nil {
+		writeJSON(w, 200, map[string]any{"ok": true})
+		return
+	}
+	if !strings.HasPrefix(prof.Name, "免费池·") {
+		writeJSON(w, 200, map[string]any{"ok": true, "profile_kept": true})
 		return
 	}
 	if err := s.m.pg.DeleteProfile(profileID); err != nil {

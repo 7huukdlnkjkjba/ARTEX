@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **工具写了却没人用（渗透成本降不下来）**：线上 `tool_usage` 1911 次调用里，
+  `recon_http` / `http_diff` / `scan_rustscan` / `path_probe` / `admin_surface` /
+  `fingerprint` / `auth_probe` / `report_finding_gated` / `sqlmap_run` / `nuclei_run` /
+  `web_audit` / `raw_tcp` / `db_dump` 合计 **0 次**；transcript 里 Bash 占全部工具调用
+  **1668/2316（72%）**（典型任务 348：950 次 worker LLM 调用、估算 ¥23.34）。根因不是
+  工具没注册（DB 绑定都在），而是：① 只靠提示词、没有执行层约束；② worker 提示词在旧库里
+  停在 3 周前的内置版本（`SeedPromptIfEmpty` 首插 only，每次改默认都要手写 reseed + flag，
+  漏一次就永远收不到）；③ Windows 上 Bash 实际由 Windows PowerShell 5.1 执行，模型按
+  bash 写 `&&` 反复吃 `InvalidEndOfLine`；④ 网关漏出的 `<|channel|>` 污染工具名，变成
+  unknown tool。
+  现修复为：**工具路由闸门**（Bash 里手搓 curl/wget/Invoke-WebRequest、
+  nmap/rustscan/masscan、sqlmap、nuclei 直接拒绝并给出对应工具与最小调用；确需原生命令
+  必须显式 `override_reason`；替代工具未绑定时自动不拦）、**意图级工具提示**（按意图关键词
+  + 本次真实工具列表生成，最多 5 条，紧贴意图块）、**Windows shell 真实语义写进 Bash 描述**、
+  **provider 层清洗被模板标记污染的工具名**、**启动时自动把仍是内置默认的提示词升级到代码
+  最新版**（用户改过的一律不碰，只打印一条提示）。闸门可用 `ARTEX_TOOLCHAIN_GATE=off` 关闭。
+
 ### 新增的功能
 
 - **内网原生协议 `raw_tcp`**：SMB2 NEGOTIATE / LDAP 匿名 Bind / TDS PRELOGIN / MySQL 握手 /

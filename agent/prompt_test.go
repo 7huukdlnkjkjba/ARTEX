@@ -51,7 +51,7 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 		return "{{if .ProxyAddr}}走代理 {{.ProxyAddr}}{{else}}手动{{end}}", true
 	}
 	recording := workerSystem("127.0.0.1:8080", "/ca.pem", "/data", "/data", false)
-	if !strings.HasPrefix(recording, "走代理 127.0.0.1:8080") {
+	if !strings.HasPrefix(strings.TrimPrefix(recording, ToolRoutingHeader), "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker proxy branch body: %q", recording)
 	}
 	if !strings.Contains(recording, "traffic_search") {
@@ -66,14 +66,14 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	// Egress proxy set but capture OFF (no CA): the ProxyAddr template branch still
 	// renders, but the trafficTool block must NOT — those tools are not registered.
 	egressOnly := workerSystem("127.0.0.1:8080", "", "/data", "/data", false)
-	if !strings.HasPrefix(egressOnly, "走代理 127.0.0.1:8080") {
+	if !strings.HasPrefix(strings.TrimPrefix(egressOnly, ToolRoutingHeader), "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker egress-only branch body: %q", egressOnly)
 	}
 	if strings.Contains(egressOnly, "traffic_search") {
 		t.Fatalf("worker without recording must NOT inject trafficTool: %q", egressOnly)
 	}
 	noProxy := workerSystem("", "", "/data", "/data", false)
-	if !strings.HasPrefix(noProxy, "手动") {
+	if !strings.HasPrefix(strings.TrimPrefix(noProxy, ToolRoutingHeader), "手动") {
 		t.Fatalf("worker no-proxy branch body: %q", noProxy)
 	}
 	if strings.Contains(noProxy, "traffic_search") {
@@ -103,7 +103,7 @@ func TestWorkerSystemIntranetVariant(t *testing.T) {
 		}
 		return "", false
 	}
-	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(got, "内网正文 true") {
+	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(strings.TrimPrefix(got, ToolRoutingHeader), "内网正文 true") {
 		t.Fatalf("worker.intranet override should win: %q", got)
 	}
 	if !strings.Contains(got, "内网红线") {
@@ -116,7 +116,7 @@ func TestWorkerSystemIntranetVariant(t *testing.T) {
 		}
 		return "", false
 	}
-	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(got, "外网正文") {
+	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(strings.TrimPrefix(got, ToolRoutingHeader), "外网正文") {
 		t.Fatalf("missing variant should fall back to worker key: %q", got)
 	}
 	// intranet=false 不追加红线尾。

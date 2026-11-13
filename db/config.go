@@ -738,6 +738,27 @@ func (d *DB) CurrentPrompt(agentID int64) (string, error) {
 	return tmpl.String, err
 }
 
+// CurrentPromptMeta returns the active prompt's text, note and version. The note
+// is how the prompt got there ("内置默认"/"恢复为内置默认" = code-owned, others =
+// user edit), which lets startup decide whether a newer code default may replace
+// it without clobbering a user's customization.
+func (d *DB) CurrentPromptMeta(agentID int64) (text, note string, version int, err error) {
+	var (
+		tmpl sql.NullString
+		n    sql.NullString
+		ver  int
+	)
+	err = d.QueryRow(`SELECT p.template_text, COALESCE(p.note,''), p.version
+		FROM agents a JOIN agent_prompts p ON p.id=a.current_prompt_id WHERE a.id=$1`, agentID).Scan(&tmpl, &n, &ver)
+	if err == sql.ErrNoRows {
+		return "", "", 0, nil
+	}
+	if err != nil {
+		return "", "", 0, err
+	}
+	return tmpl.String, n.String, ver, nil
+}
+
 // SeedPromptIfEmpty writes the code-default template as the agent's first prompt
 // version ONLY when it has none yet (current_prompt_id IS NULL). Mirrors
 // SeedTool's first-insert-only philosophy: a user's edited prompt is never

@@ -819,10 +819,20 @@ API Key 留空，保存后「设为激活」即可。
 
 | 来源 | 免 Key | 说明 |
 |---|---|---|
+| 本地 Ollama | ✅（本机） | 默认 `qwen2.5:7b`；装了 Ollama 且模型已 pull，启动时自动入池；完全不出网、不限速 |
 | Pollinations | ✅ | 匿名档 `openai-fast`（gpt-oss-20b），支持 tool calling；限 1 次/45 秒，填 pollen key 可提额 |
 | OpenRouter | ❌（自备 Key） | 免费档模型带 `:free` 后缀，每天有免费额度 |
 | Groq | ❌（自备 Key） | 免费额度、响应快 |
 | Google Gemini | ❌（自备 Key） | AI Studio 免费额度（OpenAI 兼容端点） |
+| Cerebras | ❌（自备 Key） | 免费额度、推理极快 |
+| Mistral | ❌（自备 Key） | Experiment 免费档（注意该档的数据使用条款） |
+| NVIDIA NIM | ❌（自备 Key） | 注册送免费额度，模型多 |
+| GitHub Models | ❌（自备 Key） | 用 GitHub PAT 当 Key，按账号给速率 |
+| Together AI | ❌（自备 Key） | 带 `-Free` 后缀的模型免费 |
+| 硅基流动 SiliconFlow | ❌（自备 Key） | 部分小模型免费，国内直连 |
+| 智谱 Z.ai | ❌（自备 Key） | GLM Flash 系列免费 |
+| 魔搭 ModelScope | ❌（自备 Key） | 每日免费额度；工具调用支持有限 |
+| Hugging Face | ❌（自备 Key） | 每月免费额度；工具调用支持有限 |
 
 用法：
 
@@ -831,8 +841,12 @@ API Key 留空，保存后「设为激活」即可。
 2. 打开右侧开关 **启用**：自动选第一个能回话的来源设为激活，并打开「轮询配置」的故障转移——
    当前来源被限流/报错时自动换下一个池成员，任务不会卡死；
 3. 也可以只点某个成员的 **设为激活** 单独使用；
-4. OpenRouter / Groq / Gemini 的免费档点 **添加账号**，选来源、填自己的 Key 即可入池。
-   免 Key 来源首次启动自动入池，不需要添加。
+4. 带 Key 的来源有两条**不用手填**的入池路径：环境里已经导出该厂商的 Key
+   （`OPENROUTER_API_KEY`、`GROQ_API_KEY`、`GEMINI_API_KEY`/`GOOGLE_API_KEY`、`CEREBRAS_API_KEY`、
+   `MISTRAL_API_KEY`、`NVIDIA_API_KEY`、`GITHUB_TOKEN`、`TOGETHER_API_KEY`、`SILICONFLOW_API_KEY`、
+   `ZAI_API_KEY`、`MODELSCOPE_API_KEY`、`HF_TOKEN`）→ 启动时自动建成员；或者你已经有一条
+   **同 BaseURL** 的普通 LLM 配置 → 池子直接复用它，不重复建 profile。
+   其余情况点 **添加账号**，选来源、填自己的 Key 即可入池。免 Key 来源首次启动自动入池。
 
 注意：
 
@@ -840,6 +854,7 @@ API Key 留空，保存后「设为激活」即可。
   把免费池当兜底（故障转移会自动切过去）；
 - 池成员的 `api_key` 对免 Key 来源存的是占位值 `free-pool`（ARTEX 认为远端端点必须有 Key，
   该值不会外泄，Pollinations 也会忽略 `Authorization`）；
+- 复用来的既有配置（名字不以 `免费池·` 开头）被移出池子时只摘链接、不删除原配置；
 - 每个成员默认带保守限速（Pollinations 1 次/45 秒；带 Key 的免费档 0.5–1 req/s、30 req/min），
   可在配置卡片里改；跑多任务时别把限速拉满，否则会看到大量 429/402；
 - 免费来源的可用性不在我们控制范围内，目录里加新来源只需改 `server/freepool.go` 的
