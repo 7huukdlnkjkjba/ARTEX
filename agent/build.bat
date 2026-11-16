@@ -158,7 +158,7 @@ echo [4/4] git commit
 git commit -m "%COMMIT_MSG%" || goto commit_fail
 echo [OK] 提交成功
 
-if "%DO_PUSH%"=="0" (
+if "%DO_PUSH%"=="0" (git push -u origin
   echo [done] committed locally; push skipped by --no-push.
   goto cleanup
 )
@@ -170,6 +170,7 @@ if "%BRANCH%"=="HEAD" (
 )
 echo [push] git push -u origin %BRANCH%
 git push -u origin "%BRANCH%" || goto push_fail
+echo [OK] 已提交成功
 
 echo.
 echo [done] build, commit and push completed.
