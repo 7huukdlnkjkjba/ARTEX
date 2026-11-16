@@ -27,7 +27,6 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.26** | **DB / 隐写 / Windows 注入**：新增 `db_dump`（MySQL/PostgreSQL 只读直连，list/dump、标识符转义、行/单元格上限、dump 需 confirm）、`png_stego`（PNG LSB 隐藏/提取，SHA-256）与 `win_inject`（Windows-only CreateRemoteThread，process_name 校验 + confirm，dry_run） |
 | **v0.3.27** | **AI 改 AI：基因组与成本进化**：新增 `genome_*` 表、表型采样、纯 SQL 成本归因与 `evolve_*` 工具（leaks/begin/read/propose/trial/compare/promote/abandon）；只能改 prompt/skill 文本，晋升由 Go 按净收益判定 |
 | **v0.3.28** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
-| **v0.3.29** | **工具路由闸门（把约束放进执行层）**：Bash 里手搓 `curl`/`wget`/`Invoke-WebRequest`、`nmap`/`rustscan`/`masscan`、`sqlmap`、`nuclei` 直接拒绝并给出对应专用工具与最小调用（替代工具未绑定则不拦、`override_reason` 显式放行、`--version`/`--help` 探测放行）；配套意图级工具提示（≤5 条）、Windows 上 Bash 实为 PowerShell 5.1 的真实语义写进工具描述、provider 层清洗 `<|channel|>` 污染的工具名、启动时把仍是内置默认的提示词自动升级到代码最新版（用户改过的不碰）。`ARTEX_TOOLCHAIN_GATE=off` 可关 |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -41,7 +40,6 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - DB / 隐写 / Windows 注入（`db_dump` / `png_stego` / `win_inject`）：见下文「DB、隐写与 Windows 注入（0.3.26）」
 - AI 改 AI：基因组与成本进化（`evolve_*`）：见下文「AI 改 AI：基因组与成本进化（0.3.27）」
 - 前端源码审计（`web_audit`）：见下文「前端源码审计（0.3.28）」
-- 工具路由闸门与提示词自动升级（`ARTEX_TOOLCHAIN_GATE`）：见下文「工具路由闸门与提示词自动升级（0.3.29）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -568,66 +566,6 @@ tunnel_deploy / session_exec 确认可达
 这些能力在补齐“真实 lockout 策略读取 + dry-run 默认 + 显式 confirm + 证据回写”之前，继续走 `exploit_author` / `session_exec` / `msf_execute` 或人工外部工具。
 
 `raw_tcp` / `sqlmap_run` / `nuclei_run` / `web_audit` / `impacket_proxy` / `db_dump` / `png_stego` / `win_inject` / `evolve_*` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
-
----
-
-## 工具路由闸门与提示词自动升级（0.3.29）
-
-### 为什么这次改执行层
-
-线上数据（2026-11）：worker 侧 1911 次工具调用里，`recon_http` / `http_diff` / `scan_rustscan` /
-`path_probe` / `admin_surface` / `fingerprint` / `auth_probe` / `report_finding_gated` / `sqlmap_run` /
-`nuclei_run` / `web_audit` / `raw_tcp` / `db_dump` 合计 **0 次**；Bash 占全部 transcript 工具调用的
-**72%（1668/2316）**。工具都注册好了、DB 绑定也在，只是模型不用它，而是反复手搓 `curl` /
-`Invoke-WebRequest` 把上下文和钱烧在重试上。
-
-`toolchainRule` 早就写在系统提示里，调用次数依旧是 0——所以这一版不再加提示词，而是把约束放到
-**执行层**（`agent/toolchain_gate.go`）：Bash 被调用时识别高置信度的手搓动作，直接拒绝并给出替代工具。
-
-### Bash 闸门拦什么
-
-| 手搓命令 | 改用 | 拦的理由 |
-|---|---|---|
-| `sqlmap` / `sqlmap.py` | `sqlmap_run` | 走任务 scope/代理/隧道、限速、留痕；dump 还强制 `confirm=true` + 指定 table |
-| `nuclei` | `nuclei_run` | 默认 critical/high/medium、限速 50、不开 interactsh，模板与目标受 scope 约束 |
-| `nmap` / `rustscan` / `masscan` | `scan_rustscan` | 只回开放端口并写回资产，自动走任务代理/隧道 |
-| `curl` / `curl.exe` / `wget` / `Invoke-WebRequest` / `iwr` / `Invoke-RestMethod` / `irm`、`python -c` 里的 requests/urllib/httpx | `recon_http` | 走任务 MITM/隧道、写观察台账（可被 `report_finding_gated` 引用）、回结构化状态码与响应头 |
-
-边界写死在同一份代码里：
-
-- 只按「命令起点」匹配（行首、`;`、换行、`&`、`|`、`(`），所以 `grep curl access.log` / `echo curl` 不会被误拦。
-- `--version` / `--help` 等版本、帮助探测直接放行，不制造无意义摩擦。
-- 替代工具**不在该 agent 的最终工具列表里就不拦**——不把模型逼进死路。
-- 逃生口是显式参数而不是隐藏开关：确实要原生命令（文件上传、流式响应、大文件落地、私有脚本、工具不覆盖的参数）时，把同样的命令连同 `override_reason:"为什么专用工具表达不了"` 重发即放行，且随输入留痕便于复盘。
-- `ARTEX_TOOLCHAIN_GATE=off`（或 `0`/`false`/`no`）整体关闭，无需重新编译。
-
-### 意图级工具提示
-
-全局工具表换成「这条意图 + 这次真正可用的工具」：按意图关键词（中文子串 + 英文词边界）命中最多
-**5 条**推荐，紧贴意图块输出（`agent/toolchain_hint.go`）。只推荐本 agent 最终工具列表里存在的工具，
-过滤掉某个工具时不会在别的工具说明里留下它的名字；纯代码生成，不写回用户可编辑的提示词正文。
-
-### Windows 上的真实 shell
-
-SDK 的工具名叫 `Bash`，但在 Windows 上实际由 **Windows PowerShell 5.1** 执行：没有 `&&`、`||`、
-`$()`、here-doc，多条命令用 `;`，`curl` 是 `Invoke-WebRequest` 的别名（要真 curl 得写 `curl.exe`）。
-这条语义由代码追加进 Bash 的工具描述（`ApplyBashPlatformNote`，DB 描述覆盖也删不掉），
-`ParserError` / `InvalidEndOfLine` 不再靠模型自己猜。
-
-### 工具名清洗
-
-网关/模型模板漏出的特殊 token 会把 `Bash` 变成 `Bash<|channel|>`、`LS<|channel|>commentary`，模型
-收到的是 `unknown tool`——明明选对了工具却被判定不可靠。Provider 组装处统一剥掉 `<|...` 之后的模板
-标记（含全角 `｜`），只改名字、不动参数与内容；清洗后为空则保持原样，让上层继续报错而不是静默丢调用。
-
-### 提示词自动升级
-
-`SeedPromptIfEmpty` 是首插 only，历史上每次改内置默认都要手写 reseed + 开关，漏一次线上就永远停在
-几周前的提示词（实测 worker 还是 2026-10-12 的 v1）。现在启动时 `syncBuiltinPrompts` 会：
-
-- 当前版本仍归代码所有（note 为 `内置默认` / `恢复为内置默认`）→ 直接升级到代码最新默认，日志打印 `v旧 -> v新`；
-- 用户自己改过的（note 是别的）→ **一律不碰**，只打印一条「代码里有更新的默认，需要时可点『恢复为内置默认』」；
-- 幂等：已经是当前版本就什么都不做，重启不产生噪音。
 
 ---
 
