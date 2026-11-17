@@ -27,7 +27,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.26** | **DB / 隐写 / Windows 注入**：新增 `db_dump`（MySQL/PostgreSQL 只读直连，list/dump、标识符转义、行/单元格上限、dump 需 confirm）、`png_stego`（PNG LSB 隐藏/提取，SHA-256）与 `win_inject`（Windows-only CreateRemoteThread，process_name 校验 + confirm，dry_run） |
 | **v0.3.27** | **AI 改 AI：基因组与成本进化**：新增 `genome_*` 表、表型采样、纯 SQL 成本归因与 `evolve_*` 工具（leaks/begin/read/propose/trial/compare/promote/abandon）；只能改 prompt/skill 文本，晋升由 Go 按净收益判定 |
 | **v0.3.28** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
-| **v0.3.29** | **服务端API破甲提示词**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，[手动复制提示词}(https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)|
+| **v0.3.29** | **服务端API破甲提示词**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，![手动复制提示词](https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)|
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
