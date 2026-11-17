@@ -8,27 +8,27 @@ set "COMMIT_MSG=%~1"
 if not defined COMMIT_MSG set "COMMIT_MSG=chore: update data %DATE% %TIME%"
 
 echo ============================================================
-echo  自动同步本地数据到 GitHub 云端
+echo  鑷姩鍚屾鏈湴鏁版嵁鍒?GitHub 浜戠
 echo ============================================================
 
-echo [1/3] 暂存更改...
+echo [1/3] 鏆傚瓨鏇存敼...
 git add -A
 
-echo [2/3] 提交更改...
+echo [2/3] 鎻愪氦鏇存敼...
 git commit -m "!COMMIT_MSG!"
 if errorlevel 1 (
-    echo [提示] 没有新变动，跳过提交。
+    echo [鎻愮ず] 娌℃湁鏂板彉鍔紝璺宠繃鎻愪氦銆?
 )
 
-echo [3/3] 推送至云端...
+echo [3/3] 鎺ㄩ€佽嚦浜戠...
 for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%b"
 
-:: 第一次尝试直连推送
+:: 绗竴娆″皾璇曠洿杩炴帹閫?
 git push -u origin "!BRANCH!"
 if not errorlevel 1 goto success
 
 echo.
-echo [网络异常] 443端口超时，尝试自动寻找本地代理端口...
+echo [缃戠粶寮傚父] 443绔彛瓒呮椂锛屽皾璇曡嚜鍔ㄥ鎵炬湰鍦颁唬鐞嗙鍙?..
 git config http.proxy http://127.0.0.1:7890
 git config https.proxy http://127.0.0.1:7890
 git push -u origin "!BRANCH!"
@@ -45,13 +45,13 @@ git push -u origin "!BRANCH!"
 if not errorlevel 1 goto success
 
 echo.
-echo [彻底失败] 连不上 GitHub 服务器。
-echo 请检查你的代理软件（Clash/V2ray等）是否已开启，或使用 Watt Toolkit 加速。
+echo [褰诲簳澶辫触] 杩炰笉涓?GitHub 鏈嶅姟鍣ㄣ€?
+echo 璇锋鏌ヤ綘鐨勪唬鐞嗚蒋浠讹紙Clash/V2ray绛夛級鏄惁宸插紑鍚紝鎴栦娇鐢?Watt Toolkit 鍔犻€熴€?
 pause
 exit /b 1
 
 :success
 echo.
-echo [OK] 已成功提交并推送到云端仓库！
+echo [OK] 宸叉垚鍔熸彁浜ゅ苟鎺ㄩ€佸埌浜戠浠撳簱锛?
 pause
 exit /b 0
