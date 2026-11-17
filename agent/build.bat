@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 chcp 936 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
