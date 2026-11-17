@@ -6,8 +6,8 @@ setlocal EnableExtensions
 rem ============================================================================
 rem  ARTEX / pentest-ai  Windows 免安装运行环境 —— 一键安装 + 启动
 rem
-rem  不装 Docker、不装 Go/Node、不装 PostgreSQL：直接用仓库里附带的便携环境
-rem  （pentest-ai\runtime\pgsql + artex.exe）把系统跑起来。
+rem  不装 Docker、不装 Go/Node；缺少 PostgreSQL 时自动下载便携二进制，
+rem  并将仓库根目录的预编译 artex.exe 复制到 runtime 后启动。
 rem
 rem  首次运行：初始化数据库集群 → 创建角色/库 → 生成 config.json →
 rem            初始化管理员密码
@@ -30,7 +30,7 @@ cd /d "%~dp0"
 
 rem ---------- 可覆盖参数 ----------
 if not defined PGHOST    set "PGHOST=127.0.0.1"
-if not defined PGPORT    set "PGPORT=5433"
+if not defined PGPORT    set "PGPORT=5544"
 if not defined HTTPPORT  set "HTTPPORT=8787"
 if not defined PROXYPORT set "PROXYPORT=8788"
 if not defined PGSUPER   set "PGSUPER=postgres"
@@ -91,14 +91,35 @@ rem [1/8] 便携 PostgreSQL
 rem ==========================================================================
 echo [1/8] 检查便携 PostgreSQL ...
 if exist "%PGBIN%\pg_ctl.exe" goto :step1_ok
-if exist "%RT%\pgsql" goto :err_pgsql_broken
 set "PGZIP="
 for %%z in ("%RT%\downloads\pgsql-*.zip") do set "PGZIP=%%~fz"
-if not defined PGZIP goto :err_nopgsql
-echo         未发现 runtime\pgsql，正在从压缩包展开（约 380 MB，需要几分钟）...
+if defined PGZIP goto :step1_extract
+mkdir "%RT%\downloads" 2>nul
+set "PGZIP=%RT%\downloads\pgsql-17.12.zip"
+if exist "%PGZIP%" goto :step1_extract
+set "PGPART=%PGZIP%.part"
+if exist "%PGPART%" del "%PGPART%" >nul 2>&1
+echo         正在从 EnterpriseDB 下载 PostgreSQL 17.12（约 369 MB）...
+where curl.exe >nul 2>&1
+if errorlevel 1 goto :download_pg_powershell
+curl.exe -fL --retry 3 --connect-timeout 30 -o "%PGPART%" "https://get.enterprisedb.com/postgresql/postgresql-17.12-1-windows-x64-binaries.zip"
+if errorlevel 1 goto :err_pgdownload
+goto :download_pg_done
+
+:download_pg_powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri 'https://get.enterprisedb.com/postgresql/postgresql-17.12-1-windows-x64-binaries.zip' -OutFile $env:PGPART"
+if errorlevel 1 goto :err_pgdownload
+
+:download_pg_done
+move /y "%PGPART%" "%PGZIP%" >nul
+if errorlevel 1 goto :err_pgdownload
+:step1_extract
+echo         正在从压缩包展开 PostgreSQL（约 369 MB，需要几分钟）...
 echo         来源: %PGZIP%
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:PGZIP, $env:RT)"
-if not exist "%PGBIN%\pg_ctl.exe" goto :err_nopgsql
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:PGZIP -DestinationPath $env:RT -Force"
+if errorlevel 1 goto :err_pgextract
+if not exist "%PGBIN%\pg_ctl.exe" goto :err_pgextract
+if not exist "%PGBIN%\initdb.exe" goto :err_pgextract
 :step1_ok
 for /f "delims=" %%v in ('"%PGBIN%\pg_ctl.exe" --version 2^>nul') do echo          %%v
 
@@ -106,7 +127,11 @@ rem ==========================================================================
 rem [2/8] ARTEX 单二进制
 rem ==========================================================================
 echo [2/8] 检查 artex.exe ...
-if not exist "%ARTEXEXE%" goto :err_noartex
+if exist "%ARTEXEXE%" goto :step2_ok
+if not exist "%ROOT%\artex.exe" goto :err_noartex
+copy /y "%ROOT%\artex.exe" "%ARTEXEXE%" >nul
+if errorlevel 1 goto :err_noartex_copy
+:step2_ok
 for %%f in ("%ARTEXEXE%") do echo          %%~nxf  %%~zf 字节
 
 rem ==========================================================================
@@ -137,10 +162,10 @@ rem [4/8] 数据目录（首次 initdb）+ 端口/监听
 rem ==========================================================================
 if exist "%PGDATA%\PG_VERSION" goto :step4_conf
 echo [4/8] 首次运行：初始化数据库集群 ...
-if exist "%PGDATA%" (
-  echo         数据目录不完整（无 PG_VERSION），先清空 %PGDATA%
-  rmdir /s /q "%PGDATA%" 2>nul
-)
+if not exist "%PGDATA%" goto :initdb_data_ready
+echo         数据目录不完整（无 PG_VERSION），先清空 %PGDATA%
+rmdir /s /q "%PGDATA%" 2>nul
+:initdb_data_ready
 mkdir "%PGDATA%" 2>nul
 set "PWTMP=%TMPDIR%\pgpw.txt"
 >"%PWTMP%" echo %PGPW%
@@ -164,10 +189,8 @@ echo [5/8] 启动 PostgreSQL ...
 "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" status >nul 2>&1
 if not errorlevel 1 goto :step5_ok
 "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%LOGS%\pg.log" -w -t 60 start
-if errorlevel 1 (
-  set "TAILFILE=%LOGS%\pg.log"
-  goto :err_pgstart
-)
+if errorlevel 1 set "TAILFILE=%LOGS%\pg.log"
+if errorlevel 1 goto :err_pgstart
 :step5_ok
 echo         已在运行: %PGHOST%:%PGPORT%
 
@@ -176,31 +199,25 @@ rem [6/8] 角色与数据库
 rem ==========================================================================
 set "PGPASSWORD=%PGPW%"
 "%PGBIN%\psql.exe" -h %PGHOST% -p %PGPORT% -U %PGSUPER% -d postgres -w -tAc "select 1 from pg_roles where rolname='%PGAPP%'" >"%TMPDIR%\role.txt" 2>"%TMPDIR%\role.err"
-if errorlevel 1 (
-  set "TAILFILE=%TMPDIR%\role.err"
-  set "TAILN=10"
-  goto :err_pgauth
-)
+if errorlevel 1 set "TAILFILE=%TMPDIR%\role.err"
+if errorlevel 1 set "TAILN=10"
+if errorlevel 1 goto :err_pgauth
 findstr /c:"1" "%TMPDIR%\role.txt" >nul
 if not errorlevel 1 goto :step6_db
 echo [6/8] 创建角色 %PGAPP% ...
 "%PGBIN%\psql.exe" -h %PGHOST% -p %PGPORT% -U %PGSUPER% -d postgres -w -c "create role %PGAPP% login password '%APPPW%'" >"%LOGS%\pg-init.log" 2>&1
-if errorlevel 1 (
-  set "TAILFILE=%LOGS%\pg-init.log"
-  set "TAILN=10"
-  goto :err_pgrole
-)
+if errorlevel 1 set "TAILFILE=%LOGS%\pg-init.log"
+if errorlevel 1 set "TAILN=10"
+if errorlevel 1 goto :err_pgrole
 :step6_db
 "%PGBIN%\psql.exe" -h %PGHOST% -p %PGPORT% -U %PGSUPER% -d postgres -w -tAc "select 1 from pg_database where datname='%PGDB%'" >"%TMPDIR%\db.txt" 2>nul
 findstr /c:"1" "%TMPDIR%\db.txt" >nul
 if not errorlevel 1 goto :step6_verify
 echo [6/8] 创建数据库 %PGDB% ...
 "%PGBIN%\createdb.exe" -h %PGHOST% -p %PGPORT% -U %PGSUPER% -w -O %PGAPP% %PGDB% >>"%LOGS%\pg-init.log" 2>&1
-if errorlevel 1 (
-  set "TAILFILE=%LOGS%\pg-init.log"
-  set "TAILN=10"
-  goto :err_pgdb
-)
+if errorlevel 1 set "TAILFILE=%LOGS%\pg-init.log"
+if errorlevel 1 set "TAILN=10"
+if errorlevel 1 goto :err_pgdb
 :step6_verify
 set "PGPASSWORD=%APPPW%"
 "%PGBIN%\psql.exe" -h %PGHOST% -p %PGPORT% -U %PGAPP% -d %PGDB% -w -tAc "select 1" >"%TMPDIR%\app.txt" 2>"%TMPDIR%\app.err"
@@ -273,10 +290,10 @@ echo         启动中（心跳下限 %ARTEX_PLANNER_HEARTBEAT_FLOOR%s），等�
 set /a TRY=0
 :waitloop
 set /a TRY+=1
-if %TRY% gtr 40 (
-  set "TAILFILE=%LOGS%\artex.err.log"
-  goto :err_artex
-)
+if %TRY% leq 40 goto :artex_wait_continue
+set "TAILFILE=%LOGS%\artex.err.log"
+goto :err_artex
+:artex_wait_continue
 >nul ping -n 2 %PGHOST%
 call :health
 if "%HEALTHY%"=="1" goto :artex_up
@@ -294,11 +311,9 @@ call :genpass
 set "ADMINPW=%GENPASS%"
 powershell -NoProfile -Command "$b=@{password=$env:ADMINPW} | ConvertTo-Json; try{ Invoke-RestMethod -Uri ($env:BASEURL + '/api/auth/init') -Method Post -Body $b -ContentType 'application/json' -TimeoutSec 30 | Out-Null; 'AUTH_OK' } catch { 'AUTH_FAIL ' + $_.Exception.Message }" >"%TMPDIR%\authinit.txt" 2>&1
 findstr /c:"AUTH_OK" "%TMPDIR%\authinit.txt" >nul
-if errorlevel 1 (
-  set "TAILFILE=%TMPDIR%\authinit.txt"
-  set "TAILN=5"
-  goto :err_authinit
-)
+if errorlevel 1 set "TAILFILE=%TMPDIR%\authinit.txt"
+if errorlevel 1 set "TAILN=5"
+if errorlevel 1 goto :err_authinit
 >"%SECRETS%\admin_password.txt" echo %ADMINPW%
 set "NEWPW=%ADMINPW%"
 echo         管理员已创建（用户名固定 ARTEX）
@@ -361,24 +376,23 @@ echo [错误] 找不到 %PA%
 echo        请把 install.bat 放在 ARTEX 仓库根目录（与 pentest-ai\ 同级）后重试。
 goto :fail
 
-:err_nopgsql
-echo [错误] 便携 PostgreSQL 不可用：既没有 %PGBIN%\pg_ctl.exe，
-echo        也没有可展开的 %RT%\downloads\pgsql-*.zip。
-echo        请从项目 Releases 下载完整 zip 包（内含 runtime\pgsql），
-echo        或改用 Docker：copy .env.example .env 后 docker compose up -d
+:err_pgdownload
+if exist "%PGPART%" del "%PGPART%" >nul 2>&1
+echo [错误] PostgreSQL 17.12 下载失败。请检查网络后重试。
 goto :fail
 
-:err_pgsql_broken
-echo [错误] %RT%\pgsql 存在但没有 bin\pg_ctl.exe（疑似解压不完整）。
-echo        请手动删除该目录后重新运行本脚本（会从 downloads 里的 zip 重新展开）。
+:err_pgextract
+echo [错误] PostgreSQL 压缩包无效或解压失败: %PGZIP%
 goto :fail
 
 :err_noartex
 echo [错误] 找不到 %ARTEXEXE%
-echo        请从项目 Releases 下载对应平台 zip（内含 artex.exe），或本地编译：
-echo          cd web ^&^& npm ci ^&^& npm run build:static
-echo          copy /y web\out\* server\webui\dist\
-echo          go build -tags embedui -o pentest-ai\runtime\artex.exe .\cmd\artex
+echo        当前仓库根目录也没有预编译的 artex.exe。
+echo        请获取 ARTEX Windows Release 程序文件；无需在本机编译。
+goto :fail
+
+:err_noartex_copy
+echo [错误] 无法将仓库根目录的 artex.exe 复制到 %ARTEXEXE%
 goto :fail
 
 :err_initdb
