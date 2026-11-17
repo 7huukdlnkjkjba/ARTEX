@@ -64,6 +64,8 @@ set "SECRETS=%RT%\secrets"
 set "LOGS=%RT%\logs"
 set "PGPORT_STATE=%RT%\pg_port.txt"
 if not defined PGPORT if exist "%PGPORT_STATE%" set /p PGPORT=<"%PGPORT_STATE%"
+rem [FIX] 端口文件读取后校验：只允许纯数字，非法则丢弃回落到默认值
+if defined PGPORT for /f "delims=0123456789" %%x in ("%PGPORT%") do set "PGPORT="
 if not defined PGPORT set "PGPORT=5544"
 set "STATE=%PA%\state"
 set "CONFIG=%PA%\config\config.json"
@@ -254,6 +256,8 @@ if errorlevel 1 goto :err_pgdb
 :step6_verify
 set "PGPASSWORD=%APPPW%"
 "%PGBIN%\psql.exe" -h %PGHOST% -p %PGPORT% -U %PGAPP% -d %PGDB% -w -tAc "select 1" >"%TMPDIR%\app.txt" 2>"%TMPDIR%\app.err"
+rem [FIX] 应用口令验证完立即清空 PGPASSWORD，避免驻留环境变量被后续子进程继承
+set "PGPASSWORD="
 if errorlevel 1 goto :warn_appauth
 findstr /c:"1" "%TMPDIR%\app.txt" >nul
 if errorlevel 1 goto :warn_appauth
@@ -299,19 +303,24 @@ if not defined CONFIG_NEEDS_UPDATE goto :step7_ok
 echo         正在更新 config.json 配置 ...
 set "CONFIG_FIX=%CONFIG%"
 set "SKILL_DIR_NEW=%SKILLS:\=/%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=$env:CONFIG_FIX; $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; $j.skill_dir=$env:SKILL_DIR_NEW; if($env:AUTO_PGPORT_CHANGED -eq '1'){if(-not $j.database){throw 'config.json 缺少 database 配置';}; $j.database.port=[int]$env:PGPORT}; $t=($j | ConvertTo-Json -Depth 8); [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))"
-if errorlevel 1 if defined AUTO_PGPORT_CHANGED goto :err_config_port
-if errorlevel 1 goto :warn_config
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=$env:CONFIG_FIX; try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json } catch { Write-Output ('CONFIG_PARSE_FAIL ' + $_.Exception.Message); exit 2 }; $j.skill_dir=$env:SKILL_DIR_NEW; if($env:AUTO_PGPORT_CHANGED -eq '1'){if(-not $j.database){Write-Output 'CONFIG_PARSE_FAIL missing database'; exit 3}; $j.database.port=[int]$env:PGPORT}; $t=($j | ConvertTo-Json -Depth 8); [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))" >"%TMPDIR%\configfix.txt" 2>&1
+set "CONFIGFIX_RC=%ERRORLEVEL%"
+rem [FIX] config.json 非法且需同步端口时硬失败，不能警告后继续导致端口不一致
+if not "%CONFIGFIX_RC%"=="0" if defined AUTO_PGPORT_CHANGED set "TAILFILE=%TMPDIR%\configfix.txt" & set "TAILN=10" & goto :err_config_port
+if not "%CONFIGFIX_RC%"=="0" goto :warn_config
 if defined AUTO_PGPORT_CHANGED echo         已同步数据库端口到 config.json: %PGPORT%
 echo         config.json 已更新（UTF-8 无 BOM）
 goto :step8
 :step7_ok
-echo         已存在且 skill_dir 正确: %SKILLS:\=/%
+echo         已存在且 skill_dir 正确: %SKILLS:\=/%"
 goto :step8
 
 :warn_config
 echo [警告] config.json 自动修正失败（可能不是合法 JSON）。请手工把其中的
 echo        "skill_dir" 改成: %SKILLS:\=/%"
+set "TAILFILE=%TMPDIR%\configfix.txt"
+if exist "%TMPDIR%\configfix.txt" call :tail
+goto :step8
 
 rem ==========================================================================
 rem [8/8] 启动 ARTEX + 初始化管理员
@@ -509,6 +518,7 @@ goto :fail
 :err_config_port
 echo [错误] PostgreSQL 已切换到端口 %PGPORT%，但无法同步 config.json。
 echo        请检查该文件格式及数据库配置后重试。
+call :tail
 goto :fail
 
 :err_pgauth
@@ -529,7 +539,7 @@ call :tail
 goto :fail
 
 :err_artex
-echo [错误] ARTEX 在 80 秒内没有就绪，已中止等待。日志末尾：
+echo [错误] ARTEX 在约 80 秒内没有就绪，已中止等待。日志末尾：
 call :tail
 goto :fail
 
