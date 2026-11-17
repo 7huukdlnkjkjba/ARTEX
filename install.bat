@@ -90,7 +90,7 @@ rem ==========================================================================
 rem [1/8] 便携 PostgreSQL
 rem ==========================================================================
 echo [1/8] 检查便携 PostgreSQL ...
-if exist "%PGBIN%\pg_ctl.exe" goto :step1_ok
+if exist "%PGBIN%\pg_ctl.exe" if exist "%PGBIN%\initdb.exe" goto :step1_ok
 set "PGZIP="
 for %%z in ("%RT%\downloads\pgsql-*.zip") do set "PGZIP=%%~fz"
 if defined PGZIP goto :step1_extract
