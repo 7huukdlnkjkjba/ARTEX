@@ -102,21 +102,22 @@ if exist "%PGPART%" del "%PGPART%" >nul 2>&1
 echo         正在从 EnterpriseDB 下载 PostgreSQL 17.12（约 369 MB）...
 where curl.exe >nul 2>&1
 if errorlevel 1 goto :download_pg_powershell
-curl.exe -fL --retry 3 --connect-timeout 30 -o "%PGPART%" "https://get.enterprisedb.com/postgresql/postgresql-17.12-1-windows-x64-binaries.zip"
+rem 让用户可以看到真实下载进度，而不是一长串静默等待。
+curl.exe -fL --retry 3 --connect-timeout 30 --progress-bar -o "%PGPART%" "https://get.enterprisedb.com/postgresql/postgresql-17.12-1-windows-x64-binaries.zip"
 if errorlevel 1 goto :err_pgdownload
 goto :download_pg_done
 
 :download_pg_powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri 'https://get.enterprisedb.com/postgresql/postgresql-17.12-1-windows-x64-binaries.zip' -OutFile $env:PGPART"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='Continue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $wc = New-Object System.Net.WebClient; $wc.Headers['User-Agent'] = 'ARTEX-Installer'; $wc.DownloadProgressChanged += { param($sender, $e) Write-Progress -Activity '下载 PostgreSQL 17.12' -Status ('已下载 ' + [math]::Round($e.BytesReceived/1MB,1) + ' MB / ' + [math]::Round($e.TotalBytesToReceive/1MB,1) + ' MB') -PercentComplete ([Math]::Min(100, [int]($e.ProgressPercentage))) }; $wc.DownloadFile('https://get.enterprisedb.com/postgresql/postgresql-17.12-1-windows-x64-binaries.zip', $env:PGPART)"
 if errorlevel 1 goto :err_pgdownload
 
 :download_pg_done
 move /y "%PGPART%" "%PGZIP%" >nul
 if errorlevel 1 goto :err_pgdownload
 :step1_extract
-echo         正在从压缩包展开 PostgreSQL（约 369 MB，需要几分钟）...
+echo         正在解压 PostgreSQL（约 369 MB，需要几分钟）...
 echo         来源: %PGZIP%
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:PGZIP -DestinationPath $env:RT -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$zip=$env:PGZIP; $dst=$env:RT; Write-Progress -Activity '解压 PostgreSQL' -Status '正在展开压缩包' -PercentComplete 0; Expand-Archive -LiteralPath $zip -DestinationPath $dst -Force; Write-Progress -Activity '解压 PostgreSQL' -Status '解压完成' -PercentComplete 100"
 if errorlevel 1 goto :err_pgextract
 if not exist "%PGBIN%\pg_ctl.exe" goto :err_pgextract
 if not exist "%PGBIN%\initdb.exe" goto :err_pgextract
@@ -161,7 +162,8 @@ rem ==========================================================================
 rem [4/8] 数据目录（首次 initdb）+ 端口/监听
 rem ==========================================================================
 if exist "%PGDATA%\PG_VERSION" goto :step4_conf
-echo [4/8] 首次运行：初始化数据库集群 ...
+echo [4/8] 初始化数据库集群（首次运行）...
+echo         正在初始化 PostgreSQL 数据目录 ...
 if not exist "%PGDATA%" goto :initdb_data_ready
 echo         数据目录不完整（无 PG_VERSION），先清空 %PGDATA%
 rmdir /s /q "%PGDATA%" 2>nul
@@ -186,6 +188,7 @@ rem ==========================================================================
 rem [5/8] 启动 PostgreSQL
 rem ==========================================================================
 echo [5/8] 启动 PostgreSQL ...
+echo         正在启动 PostgreSQL 服务 ...
 "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" status >nul 2>&1
 if not errorlevel 1 goto :step5_ok
 "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%LOGS%\pg.log" -w -t 60 start
@@ -280,6 +283,7 @@ rem [8/8] 启动 ARTEX + 初始化管理员
 rem ==========================================================================
 :step8
 echo [8/8] 启动 ARTEX ...
+echo         正在启动 ARTEX 后端服务 ...
 call :health
 if "%HEALTHY%"=="1" goto :artex_up
 if not defined ARTEX_PLANNER_HEARTBEAT_FLOOR set "ARTEX_PLANNER_HEARTBEAT_FLOOR=300"

@@ -11,14 +11,24 @@ set "PGBIN=%PA%\runtime\pgsql\bin"
 set "PGDATA=%PA%\runtime\pgdata"
 set "LOGS=%PA%\runtime\logs"
 set "STARTPS1=%PA%\scripts\start.ps1"
+set "PORTSELECTOR=%PA%\scripts\resolve-pg-port.ps1"
 set "INSTALLBAT=%~dp0install.bat"
-set "PGPORT=5544"
 
 if not exist "%STARTPS1%" goto :missing_start_script
 if not exist "%INSTALLBAT%" goto :missing_install_script
 where pwsh >nul 2>&1
 if errorlevel 1 goto :missing_pwsh
+if not exist "%PORTSELECTOR%" goto :missing_port_selector
+set "PORTFILE=%TEMP%\artex-pgport-%RANDOM%%RANDOM%.txt"
+pwsh -NoProfile -File "%PORTSELECTOR%" -DataDirectory "%PGDATA%" >"%PORTFILE%"
+set "PORTSELECT_RC=%ERRORLEVEL%"
+if exist "%PORTFILE%" set /p PGPORT=<"%PORTFILE%"
+if exist "%PORTFILE%" del "%PORTFILE%" >nul 2>&1
+if not "%PORTSELECT_RC%"=="0" goto :port_selection_failed
+if not defined PGPORT goto :port_selection_failed
+echo [pg] 使用端口 %PGPORT%
 if not exist "%PGBIN%\pg_ctl.exe" goto :first_run
+if not exist "%PGBIN%\initdb.exe" goto :first_run
 if not exist "%PGDATA%\PG_VERSION" goto :first_run
 if not exist "%LOGS%" mkdir "%LOGS%" >nul 2>&1
 
@@ -68,6 +78,14 @@ goto :fail
 echo [错误] 找不到安装脚本: %INSTALLBAT%
 goto :fail
 
+:missing_port_selector
+echo [错误] 找不到 PostgreSQL 端口选择脚本: %PORTSELECTOR%
+goto :fail
+
+:port_selection_failed
+echo [错误] 无法选择可用的 PostgreSQL 端口（5544-5999）
+goto :fail
+
 :install_failed
 echo [错误] 本机初始化失败，请检查 install.bat 输出和运行日志
 goto :fail
@@ -87,6 +105,7 @@ start "" firefox.exe "http://127.0.0.1:8787/login"
 :complete
 echo.
 echo   控制台 : http://127.0.0.1:8787   (用户名 ARTEX)
+echo   数据库端口: %PGPORT%
 echo   录制代理: 127.0.0.1:8788
 echo   停止    : pwsh -File .\pentest-ai\scripts\stop.ps1
 echo   驾驶舱  : pwsh -File .\pentest-ai\scripts\status.ps1
