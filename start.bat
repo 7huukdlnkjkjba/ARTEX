@@ -29,8 +29,8 @@ if not exist "%LOGS%" mkdir "%LOGS%" >nul 2>&1
 
 rem ---------- 1. PostgreSQL (127.0.0.1:5433) ----------
 rem 输出必须重定向到 nul/文件，不能接管道: postgres 会继承管道句柄，导致等待不返回。
-rem 用 pg_isready 判断"是否可连"：数据库以 Windows 服务(ARTEX-PG)运行时，
-rem pg_ctl status 拿不到 SYSTEM 进程信息，会误报 "no server running" 并触发重复启动。
+rem Use pg_isready to detect readiness; pg_ctl status cannot see a Windows service process.
+rem This avoids incorrectly starting a second PostgreSQL instance.
 "%PGBIN%\pg_isready.exe" -h 127.0.0.1 -p 5433 >nul 2>&1
 if errorlevel 1 (
   echo [pg] 正在启动 ...
@@ -57,8 +57,12 @@ if errorlevel 1 (
   goto :fail
 )
 
-rem ---------- 3. 打开控制台（仅 Firefox，后端就绪后再开，避免首个请求打空） ----------
-start "" firefox.exe "http://127.0.0.1:8787/login"
+rem ---------- 3. 自动登录并打开控制台 ----------
+pwsh -NoProfile -ExecutionPolicy Bypass -File "%PA%\scripts\open-ui.ps1"
+if errorlevel 1 (
+  echo [警告] 自动登录失败，打开手动登录页
+  start "" firefox.exe "http://127.0.0.1:8787/login"
+)
 
 echo.
 echo   控制台 : http://127.0.0.1:8787   (用户名 ARTEX)

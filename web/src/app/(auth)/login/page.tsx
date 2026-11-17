@@ -17,6 +17,17 @@ export default function LoginPage() {
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
+    const autoToken = new URLSearchParams(window.location.hash.slice(1)).get("autologin");
+    if (autoToken) {
+      const currentUrl = new URL(window.location.href);
+      currentUrl.hash = "";
+      currentUrl.searchParams.delete("launch");
+      window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}`);
+      auth.setToken(autoToken);
+      window.location.replace("/function/tasks");
+      return;
+    }
+
     // 已登录直接进主界面（静态导出下无 middleware 代劳这层跳转）。
     const token = auth.getToken();
     if (token) {
