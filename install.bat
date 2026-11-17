@@ -18,6 +18,7 @@ rem    install.bat                       安装/启动，结束后打开浏览�
 rem    install.bat -nobrowser            同上，但不打开浏览器
 rem    install.bat -nobrowser -nopause   全自动（脚本/任务计划里用，不暂停）
 rem    set PGPORT=5544 && install.bat    换端口（PGPORT / HTTPPORT / PROXYPORT）
+rem    PostgreSQL 端口占用时自动选择后续可用端口，并保存到 runtime\pg_port.txt
 rem
 rem  停止：本脚本不常驻。停止用 pentest-ai\scripts\stop.ps1，
 rem        或直接关掉那个最小化的「ARTEX 后端」窗口。
@@ -30,12 +31,12 @@ cd /d "%~dp0"
 
 rem ---------- 可覆盖参数 ----------
 if not defined PGHOST    set "PGHOST=127.0.0.1"
-if not defined PGPORT    set "PGPORT=5544"
 if not defined HTTPPORT  set "HTTPPORT=8787"
 if not defined PROXYPORT set "PROXYPORT=8788"
 if not defined PGSUPER   set "PGSUPER=postgres"
 if not defined PGAPP     set "PGAPP=artex"
 if not defined PGDB      set "PGDB=artex"
+set "AUTO_PGPORT_CHANGED="
 set "OPENBROWSER=1"
 
 rem ---------- 命令行开关 ----------
@@ -61,6 +62,9 @@ set "PGBIN=%RT%\pgsql\bin"
 set "PGDATA=%RT%\pgdata"
 set "SECRETS=%RT%\secrets"
 set "LOGS=%RT%\logs"
+set "PGPORT_STATE=%RT%\pg_port.txt"
+if not defined PGPORT if exist "%PGPORT_STATE%" set /p PGPORT=<"%PGPORT_STATE%"
+if not defined PGPORT set "PGPORT=5544"
 set "STATE=%PA%\state"
 set "CONFIG=%PA%\config\config.json"
 set "ARTEXEXE=%RT%\artex.exe"
@@ -191,9 +195,35 @@ echo [5/8] 启动 PostgreSQL ...
 echo         正在启动 PostgreSQL 服务 ...
 "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" status >nul 2>&1
 if not errorlevel 1 goto :step5_ok
-"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%LOGS%\pg.log" -w -t 60 start
-if errorlevel 1 set "TAILFILE=%LOGS%\pg.log"
-if errorlevel 1 goto :err_pgstart
+set "PGPORT_RETRIES=0"
+call :find_pgport
+if not defined FREEPORT set "TAILFILE=%TMPDIR%\pgport.err"
+if not defined FREEPORT goto :err_pgport
+if "%FREEPORT%"=="%PGPORT%" goto :step5_start
+echo         端口 %PGPORT% 已被占用，自动切换到 %FREEPORT% ...
+set "PGPORT=%FREEPORT%"
+set "AUTO_PGPORT_CHANGED=1"
+>>"%PGDATA%\postgresql.conf" echo port = %PGPORT%
+if errorlevel 1 goto :err_pgconf
+:step5_start
+"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%LOGS%\pg.log" -w -t 60 -o "-p %PGPORT%" start
+if not errorlevel 1 goto :step5_started
+set "TAILFILE=%LOGS%\pg.log"
+call :find_pgport
+if not defined FREEPORT goto :err_pgstart
+if "%FREEPORT%"=="%PGPORT%" goto :err_pgstart
+set /a PGPORT_RETRIES+=1
+if %PGPORT_RETRIES% gtr 5 goto :err_pgstart
+echo         端口启动时发生冲突，改用 %FREEPORT% 重试 ...
+set "PGPORT=%FREEPORT%"
+set "AUTO_PGPORT_CHANGED=1"
+>>"%PGDATA%\postgresql.conf" echo port = %PGPORT%
+if errorlevel 1 goto :err_pgconf
+goto :step5_start
+:step5_started
+if not defined AUTO_PGPORT_CHANGED goto :step5_ok
+>"%PGPORT_STATE%" echo %PGPORT%
+if errorlevel 1 goto :err_pgportstate
 :step5_ok
 echo         已在运行: %PGHOST%:%PGPORT%
 
@@ -261,14 +291,19 @@ echo         已生成: %CONFIG%
 goto :step8
 :step7_fix
 rem skill_dir 优先级高于默认值，指向不存在的目录会让 skills 被静默跳过 —— 这里修掉
+set "CONFIG_NEEDS_UPDATE="
 findstr /i /c:"%SKILLS:\=/%" "%CONFIG%" >nul
-if not errorlevel 1 goto :step7_ok
-echo         config.json 里的 skill_dir 不是当前仓库路径，修正中 ...
+if errorlevel 1 set "CONFIG_NEEDS_UPDATE=1"
+if defined AUTO_PGPORT_CHANGED set "CONFIG_NEEDS_UPDATE=1"
+if not defined CONFIG_NEEDS_UPDATE goto :step7_ok
+echo         正在更新 config.json 配置 ...
 set "CONFIG_FIX=%CONFIG%"
 set "SKILL_DIR_NEW=%SKILLS:\=/%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=$env:CONFIG_FIX; $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; $j.skill_dir=$env:SKILL_DIR_NEW; $t=($j | ConvertTo-Json -Depth 8); [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=$env:CONFIG_FIX; $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json; $j.skill_dir=$env:SKILL_DIR_NEW; if($env:AUTO_PGPORT_CHANGED -eq '1'){if(-not $j.database){throw 'config.json 缺少 database 配置';}; $j.database.port=[int]$env:PGPORT}; $t=($j | ConvertTo-Json -Depth 8); [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))"
+if errorlevel 1 if defined AUTO_PGPORT_CHANGED goto :err_config_port
 if errorlevel 1 goto :warn_config
-echo         已修正 skill_dir = %SKILLS:\=/%（UTF-8 无 BOM）
+if defined AUTO_PGPORT_CHANGED echo         已同步数据库端口到 config.json: %PGPORT%
+echo         config.json 已更新（UTF-8 无 BOM）
 goto :step8
 :step7_ok
 echo         已存在且 skill_dir 正确: %SKILLS:\=/%
@@ -323,7 +358,48 @@ set "NEWPW=%ADMINPW%"
 echo         管理员已创建（用户名固定 ARTEX）
 goto :summary
 :auth_done
-echo         管理员已初始化过，跳过（密码见 secrets\admin_password.txt）
+set "ADMINPW="
+if exist "%SECRETS%\admin_password.txt" set /p ADMINPW=<"%SECRETS%\admin_password.txt"
+if not defined ADMINPW goto :auth_recover
+powershell -NoProfile -Command "$b=@{username='ARTEX';password=$env:ADMINPW} | ConvertTo-Json -Compress; try{$r=Invoke-RestMethod -Uri ($env:BASEURL + '/api/auth/login') -Method Post -Body $b -ContentType 'application/json' -TimeoutSec 10; if($r.token){'LOGIN_OK'}else{'LOGIN_ERROR 登录接口未返回 token'; exit 1}} catch {$response=$_.Exception.Response; if($response -and [int]$response.StatusCode -eq 401){'LOGIN_BAD'}else{'LOGIN_ERROR ' + $_.Exception.Message; exit 1}}" >"%TMPDIR%\authverify.txt" 2>&1
+findstr /c:"LOGIN_OK" "%TMPDIR%\authverify.txt" >nul
+if not errorlevel 1 goto :auth_saved_ok
+findstr /c:"LOGIN_BAD" "%TMPDIR%\authverify.txt" >nul
+if not errorlevel 1 goto :auth_recover
+set "TAILFILE=%TMPDIR%\authverify.txt"
+goto :err_authverify
+
+:auth_recover
+echo         管理员密码文件缺失或不匹配，正在重置本机管理员密码 ...
+call :genpass
+set "ADMINPW=%GENPASS%"
+set "PGPASSWORD=%PGPW%"
+>"%TMPDIR%\reset-admin.sql" echo \set ON_ERROR_STOP on
+>>"%TMPDIR%\reset-admin.sql" echo \getenv newpw ADMINPW
+>>"%TMPDIR%\reset-admin.sql" echo CREATE EXTENSION IF NOT EXISTS pgcrypto;
+>>"%TMPDIR%\reset-admin.sql" echo INSERT INTO settings(key, value)
+>>"%TMPDIR%\reset-admin.sql" echo VALUES ('auth.password_hash', crypt(:'newpw', gen_salt('bf', 10)))
+>>"%TMPDIR%\reset-admin.sql" echo ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+"%PGBIN%\psql.exe" -h %PGHOST% -p %PGPORT% -U %PGSUPER% -d %PGDB% -w -v ON_ERROR_STOP=1 -f "%TMPDIR%\reset-admin.sql" >"%LOGS%\admin-password-reset.log" 2>&1
+set "AUTHRESET_RC=%ERRORLEVEL%"
+set "PGPASSWORD="
+if not "%AUTHRESET_RC%"=="0" set "TAILFILE=%LOGS%\admin-password-reset.log"
+if not "%AUTHRESET_RC%"=="0" goto :err_authreset
+powershell -NoProfile -Command "$b=@{username='ARTEX';password=$env:ADMINPW} | ConvertTo-Json -Compress; try{$r=Invoke-RestMethod -Uri ($env:BASEURL + '/api/auth/login') -Method Post -Body $b -ContentType 'application/json' -TimeoutSec 10; if($r.token){'LOGIN_OK'}else{'LOGIN_ERROR 登录接口未返回 token'; exit 1}} catch {'LOGIN_ERROR ' + $_.Exception.Message; exit 1}" >"%TMPDIR%\authverify.txt" 2>&1
+findstr /c:"LOGIN_OK" "%TMPDIR%\authverify.txt" >nul
+if not errorlevel 1 goto :auth_reset_verified
+set "TAILFILE=%TMPDIR%\authverify.txt"
+goto :err_authresetverify
+:auth_reset_verified
+>"%SECRETS%\admin_password.txt" echo %ADMINPW%
+if errorlevel 1 goto :err_authreset_save
+set "NEWPW=%ADMINPW%"
+echo         管理员密码已重置并保存到 secrets\admin_password.txt
+goto :summary
+
+:auth_saved_ok
+echo         管理员密码文件验证通过
+goto :summary
 
 :summary
 echo.
@@ -353,6 +429,12 @@ rem ==========================================================================
 set "GENPASS="
 for /f "delims=" %%g in ('powershell -NoProfile -Command "([guid]::NewGuid().ToString()+[guid]::NewGuid().ToString()).Substring(0,28)"') do set "GENPASS=%%g"
 if not defined GENPASS set "GENPASS=artex%RANDOM%%RANDOM%%RANDOM%%RANDOM%"
+goto :eof
+
+:find_pgport
+set "FREEPORT="
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ip=$null; try{$ip=[Net.IPAddress]::Parse($env:PGHOST)}catch{$addresses=[Net.Dns]::GetHostAddresses($env:PGHOST); $ip=$addresses | Where-Object {$_.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork} | Select-Object -First 1; if(-not $ip){$ip=$addresses | Select-Object -First 1}}; if(-not $ip){exit 2}; $first=[int]$env:PGPORT; $last=[Math]::Min(65535,$first+100); for($port=$first; $port -le $last; $port++){ $listener=$null; try{$listener=[Net.Sockets.TcpListener]::new($ip,$port); $listener.Start(); $listener.Stop(); Write-Output $port; exit 0}catch{if($listener){try{$listener.Stop()}catch{}}}}; exit 1" >"%TMPDIR%\pgport.txt" 2>"%TMPDIR%\pgport.err"
+for /f "usebackq delims=" %%p in ("%TMPDIR%\pgport.txt") do set "FREEPORT=%%p"
 goto :eof
 
 :health
@@ -409,6 +491,26 @@ echo [错误] PostgreSQL 启动失败。日志末尾：
 call :tail
 goto :fail
 
+:err_pgport
+set "TAILN=5"
+echo [错误] PostgreSQL 端口 %PGPORT% 附近没有可用端口，或无法检查监听地址。
+echo        请检查 %PGHOST% 和以下错误信息，或手动设置 PGPORT 后重试。
+call :tail
+goto :fail
+
+:err_pgportstate
+echo [错误] PostgreSQL 已启动，但无法保存自动选择的端口到 %PGPORT_STATE%。
+goto :fail
+
+:err_pgconf
+echo [错误] 无法将自动选择的 PostgreSQL 端口写入 postgresql.conf。
+goto :fail
+
+:err_config_port
+echo [错误] PostgreSQL 已切换到端口 %PGPORT%，但无法同步 config.json。
+echo        请检查该文件格式及数据库配置后重试。
+goto :fail
+
 :err_pgauth
 echo [错误] 用超级用户 %PGSUPER% 连接 PostgreSQL 失败（%PGHOST%:%PGPORT%）。
 echo        脚本读取的口令来自 %SECRETS%\pg_super.txt。
@@ -435,6 +537,31 @@ goto :fail
 echo [错误] 管理员初始化失败（接口返回错误）：
 call :tail
 echo        可以打开 %BASEURL%/setup 在浏览器里设置管理员密码。
+goto :fail
+
+:err_authverify
+set "TAILN=5"
+echo [错误] 无法确认管理员密码是否有效；未修改现有密码。
+call :tail
+goto :fail
+
+:err_authreset
+echo [错误] 无法重置本机管理员密码；现有密码文件未覆盖。
+echo        请检查 %LOGS%\admin-password-reset.log 和 PostgreSQL 超级用户口令。
+call :tail
+goto :fail
+
+:err_authresetverify
+set "TAILN=5"
+echo [错误] 数据库已更新密码，但 ARTEX 登录接口未接受新密码。
+echo        请检查 config.json 中的数据库连接是否与本机 PostgreSQL 一致。
+echo        本次写入本机数据库的新密码: %ADMINPW%
+call :tail
+goto :fail
+
+:err_authreset_save
+echo [错误] 管理员密码已重置，但无法写入密码文件。
+echo        本次新密码为: %ADMINPW%
 goto :fail
 
 rem ==========================================================================
