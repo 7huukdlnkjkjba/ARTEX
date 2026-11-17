@@ -23,6 +23,11 @@ if errorlevel 1 (
 echo [3/3] Push to remote...
 for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%b"
 
+git config --global --unset-all http.proxy
+git config --global --unset-all https.proxy
+git config --local --unset-all http.proxy
+git config --local --unset-all https.proxy
+
 git push -u origin "!BRANCH!"
 if not errorlevel 1 goto success
 
@@ -44,7 +49,7 @@ git push -u origin "!BRANCH!"
 if not errorlevel 1 goto success
 
 echo.
-echo [Connection failed] This is not the GitHub server? Check whether your GitHub proxy is enabled or if you are using tools such as Clash/V2Ray.
+echo [Connection failed] This is not the GitHub server? Check whether your GitHub proxy is enabled, or if you are using tools such as Clash/V2Ray.
 pause
 exit /b 1
 
