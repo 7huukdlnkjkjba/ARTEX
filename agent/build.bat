@@ -2,44 +2,56 @@
 chcp 936 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
-if exist "%~dp0.git" (
-  pushd "%~dp0" >nul 2>nul
-) else (
-  pushd "%~dp0.." >nul 2>nul
-)
+pushd "%~dp0" >nul 2>nul
 
-set "COMMIT_MSG="
-if not "%~1"=="" set "COMMIT_MSG=%~1"
-if not defined COMMIT_MSG set "COMMIT_MSG=chore: update %DATE% %TIME%"
+set "COMMIT_MSG=%~1"
+if not defined COMMIT_MSG set "COMMIT_MSG=chore: update data %DATE% %TIME%"
 
 echo ============================================================
-echo  ×Ô¶¯Ìá½»²¢ÍÆËÍ±¾µØÊı¾İµ½ GitHub
-echo  Ä¿Â¼: %CD%
-echo  Ìá½»ĞÅÏ¢: !COMMIT_MSG!
+echo  è‡ªåŠ¨åŒæ­¥æœ¬åœ°æ•°æ®åˆ° GitHub äº‘ç«¯
 echo ============================================================
 
-echo [1/3] Ìí¼ÓËùÓĞ¸ü¸Ä...
+echo [1/3] æš‚å­˜æ›´æ”¹...
 git add -A
 
-echo [2/3] Ìá½»¸ü¸Ä...
+echo [2/3] æäº¤æ›´æ”¹...
 git commit -m "!COMMIT_MSG!"
 if errorlevel 1 (
-  echo [ÌáÊ¾] Ã»ÓĞĞèÒªÌá½»µÄĞÂ¸ü¸Ä£¬»òÕßÌá½»Ê§°Ü¡£
+    echo [æç¤º] æ²¡æœ‰æ–°å˜åŠ¨ï¼Œè·³è¿‡æäº¤ã€‚
 )
 
-echo [3/3] ÍÆËÍµ½ÔÆ¶Ë...
+echo [3/3] æ¨é€è‡³äº‘ç«¯...
 for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%b"
-git push -u origin "!BRANCH!"
 
-if errorlevel 1 (
-  echo.
-  echo [´íÎó] ÍÆËÍÊ§°Ü£¬Çë¼ì²éÍøÂç»òÔ¶³Ì²Ö¿âÈ¨ÏŞ¡£
-) else (
-  echo.
-  echo [³É¹¦] ±¾µØÊı¾İÒÑ³É¹¦Ìá½»²¢ÍÆËÍµ½ÔÆ¶Ë²Ö¿â¡£
-)
+:: ç¬¬ä¸€æ¬¡å°è¯•ç›´è¿æ¨é€
+git push -u origin "!BRANCH!"
+if not errorlevel 1 goto success
 
 echo.
+echo [ç½‘ç»œå¼‚å¸¸] 443ç«¯å£è¶…æ—¶ï¼Œå°è¯•è‡ªåŠ¨å¯»æ‰¾æœ¬åœ°ä»£ç†ç«¯å£...
+git config http.proxy http://127.0.0.1:7890
+git config https.proxy http://127.0.0.1:7890
+git push -u origin "!BRANCH!"
+if not errorlevel 1 goto success
+
+git config http.proxy http://127.0.0.1:10809
+git config https.proxy http://127.0.0.1:10809
+git push -u origin "!BRANCH!"
+if not errorlevel 1 goto success
+
+git config http.proxy http://127.0.0.1:1080
+git config https.proxy http://127.0.0.1:1080
+git push -u origin "!BRANCH!"
+if not errorlevel 1 goto success
+
+echo.
+echo [å½»åº•å¤±è´¥] è¿ä¸ä¸Š GitHub æœåŠ¡å™¨ã€‚
+echo è¯·æ£€æŸ¥ä½ çš„ä»£ç†è½¯ä»¶ï¼ˆClash/V2rayç­‰ï¼‰æ˜¯å¦å·²å¼€å¯ï¼Œæˆ–ä½¿ç”¨ Watt Toolkit åŠ é€Ÿã€‚
 pause
-endlocal
+exit /b 1
+
+:success
+echo.
+echo [OK] å·²æˆåŠŸæäº¤å¹¶æ¨é€åˆ°äº‘ç«¯ä»“åº“ï¼
+pause
 exit /b 0
