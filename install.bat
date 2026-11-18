@@ -3,33 +3,9 @@ for /f "tokens=2 delims=:" %%c in ('chcp') do set "OLDCP=%%c"
 set "OLDCP=%OLDCP: =%"
 chcp 65001 >nul
 setlocal EnableExtensions
-rem ============================================================================
-rem  ARTEX / pentest-ai  Windows 免安装运行环境 —— 一键安装 + 启动
-rem
-rem  不装 Docker、不装 Go/Node；缺少 PostgreSQL 时自动下载便携二进制，
-rem  并将仓库根目录的预编译 artex.exe 复制到 runtime 后启动。
-rem
-rem  首次运行：初始化数据库集群 → 创建角色/库 → 生成 config.json →
-rem            初始化管理员密码
-rem  之后运行：检查 + 启动（幂等，可反复执行）
-rem
-rem  用法：
-rem    install.bat                       安装/启动，结束后打开浏览器
-rem    install.bat -nobrowser            同上，但不打开浏览器
-rem    install.bat -nobrowser -nopause   全自动（脚本/任务计划里用，不暂停）
-rem    set PGPORT=5544 && install.bat    换端口（PGPORT / HTTPPORT / PROXYPORT）
-rem    PostgreSQL 端口占用时自动选择后续可用端口，并保存到 runtime\pg_port.txt
-rem
-rem  停止：本脚本不常驻。停止用 pentest-ai\scripts\stop.ps1，
-rem        或直接关掉那个最小化的「ARTEX 后端」窗口。
-rem
-rem  注：日常启停也可以继续用 pentest-ai\scripts\start.ps1 / stop.ps1 / status.ps1；
-rem      本脚本多做的是「首次初始化」（initdb + 建角色/库 + 生成配置）。
-rem ============================================================================
 
 cd /d "%~dp0"
 
-rem ---------- 可覆盖参数 ----------
 if not defined PGHOST    set "PGHOST=127.0.0.1"
 if not defined HTTPPORT  set "HTTPPORT=8787"
 if not defined PROXYPORT set "PROXYPORT=8788"
@@ -39,7 +15,6 @@ if not defined PGDB      set "PGDB=artex"
 set "AUTO_PGPORT_CHANGED="
 set "OPENBROWSER=1"
 
-rem ---------- 命令行开关 ----------
 set "PAUSE_ON_EXIT="
 echo %CMDCMDLINE% | findstr /i /c:"/c" >nul
 if not errorlevel 1 set "PAUSE_ON_EXIT=1"
@@ -53,7 +28,6 @@ shift
 goto :parseargs
 :afterparse
 
-rem ---------- 路径（相对本文件所在目录） ----------
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "PA=%ROOT%\pentest-ai"
@@ -64,7 +38,6 @@ set "SECRETS=%RT%\secrets"
 set "LOGS=%RT%\logs"
 set "PGPORT_STATE=%RT%\pg_port.txt"
 if not defined PGPORT if exist "%PGPORT_STATE%" set /p PGPORT=<"%PGPORT_STATE%"
-rem [FIX] 端口文件读取后校验：只允许纯数字，非法则丢弃回落到默认值
 if defined PGPORT for /f "delims=0123456789" %%x in ("%PGPORT%") do set "PGPORT="
 if not defined PGPORT set "PGPORT=5544"
 set "STATE=%PA%\state"
@@ -92,36 +65,32 @@ mkdir "%SECRETS%" 2>nul
 mkdir "%LOGS%" 2>nul
 mkdir "%STATE%\data" 2>nul
 
-rem ==========================================================================
-rem [1/8] 便携 PostgreSQL
-rem ==========================================================================
 echo [1/8] 检查便携 PostgreSQL ...
 if exist "%PGBIN%\pg_ctl.exe" if exist "%PGBIN%\initdb.exe" goto :step1_ok
 set "PGZIP="
 for %%z in ("%RT%\downloads\pgsql-*.zip") do set "PGZIP=%%~fz"
 if defined PGZIP goto :step1_extract
 mkdir "%RT%\downloads" 2>nul
-set "PGZIP=%RT%\downloads\pgsql-17.12.zip"
+set "PGZIP=%RT%\downloads\pgsql.zip"
 if exist "%PGZIP%" goto :step1_extract
 set "PGPART=%PGZIP%.part"
 if exist "%PGPART%" del "%PGPART%" >nul 2>&1
-echo         正在从 EnterpriseDB 下载 PostgreSQL 17.12（约 369 MB）...
+echo         正在下载自定义 PostgreSQL（约 369 MB）...
 where curl.exe >nul 2>&1
 if errorlevel 1 goto :download_pg_powershell
-rem 让用户可以看到真实下载进度，而不是一长串静默等待。
-curl.exe -fL --retry 3 --connect-timeout 30 --progress-bar -o "%PGPART%" "https://get.enterprisedb.com/postgresql/postgresql-17.12-1-windows-x64-binaries.zip"
+curl.exe -fL --retry 3 --connect-timeout 30 --progress-bar -o "%PGPART%" "https://github.com/7huukdlnkjkjba/ARTEX/releases/download/v17.11/pgsql.zip"
 if errorlevel 1 goto :err_pgdownload
 goto :download_pg_done
 
 :download_pg_powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='Continue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $wc = New-Object System.Net.WebClient; $wc.Headers['User-Agent'] = 'ARTEX-Installer'; $wc.DownloadProgressChanged += { param($sender, $e) Write-Progress -Activity '下载 PostgreSQL 17.12' -Status ('已下载 ' + [math]::Round($e.BytesReceived/1MB,1) + ' MB / ' + [math]::Round($e.TotalBytesToReceive/1MB,1) + ' MB') -PercentComplete ([Math]::Min(100, [int]($e.ProgressPercentage))) }; $wc.DownloadFile('https://get.enterprisedb.com/postgresql/postgresql-17.12-1-windows-x64-binaries.zip', $env:PGPART)"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='Continue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $wc = New-Object System.Net.WebClient; $wc.Headers['User-Agent'] = 'ARTEX-Installer'; $wc.DownloadProgressChanged += { param($sender, $e) Write-Progress -Activity '下载 PostgreSQL' -Status ('已下载 ' + [math]::Round($e.BytesReceived/1MB,1) + ' MB / ' + [math]::Round($e.TotalBytesToReceive/1MB,1) + ' MB') -PercentComplete ([Math]::Min(100, [int]($e.ProgressPercentage))) }; $wc.DownloadFile('https://github.com/7huukdlnkjkjba/ARTEX/releases/download/v17.11/pgsql.zip', $env:PGPART)"
 if errorlevel 1 goto :err_pgdownload
 
 :download_pg_done
 move /y "%PGPART%" "%PGZIP%" >nul
 if errorlevel 1 goto :err_pgdownload
 :step1_extract
-echo         正在解压 PostgreSQL（约 369 MB，需要几分钟）...
+echo         正在解压 PostgreSQL（需要几分钟）...
 echo         来源: %PGZIP%
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$zip=$env:PGZIP; $dst=$env:RT; Write-Progress -Activity '解压 PostgreSQL' -Status '正在展开压缩包' -PercentComplete 0; Expand-Archive -LiteralPath $zip -DestinationPath $dst -Force; Write-Progress -Activity '解压 PostgreSQL' -Status '解压完成' -PercentComplete 100"
 if errorlevel 1 goto :err_pgextract
@@ -130,9 +99,6 @@ if not exist "%PGBIN%\initdb.exe" goto :err_pgextract
 :step1_ok
 for /f "delims=" %%v in ('"%PGBIN%\pg_ctl.exe" --version 2^>nul') do echo          %%v
 
-rem ==========================================================================
-rem [2/8] ARTEX 单二进制
-rem ==========================================================================
 echo [2/8] 检查 artex.exe ...
 if exist "%ARTEXEXE%" goto :step2_ok
 if not exist "%ROOT%\artex.exe" goto :err_noartex
@@ -141,12 +107,7 @@ if errorlevel 1 goto :err_noartex_copy
 :step2_ok
 for %%f in ("%ARTEXEXE%") do echo          %%~nxf  %%~zf 字节
 
-rem ==========================================================================
-rem [3/8] 口令（幂等：已存在则复用）
-rem ==========================================================================
 echo [3/8] 准备口令文件 ...
-rem 先用 HAVE_* 记录"文件里确实读到了口令"，再决定要不要落盘：
-rem 不能用 if not defined PGPW 当写盘条件 —— 那时 PGPW 已被上一行赋值，条件恒假，文件永远写不出来。
 set "PGPW="
 set "HAVE_PGPW="
 if exist "%SECRETS%\pg_super.txt" set /p PGPW=<"%SECRETS%\pg_super.txt"
@@ -164,9 +125,6 @@ if not defined APPPW set "APPPW=%GENPASS%"
 if not defined HAVE_APPPW >"%SECRETS%\artex_pg.txt" echo %APPPW%
 echo         应用用户口令 : secrets\artex_pg.txt
 
-rem ==========================================================================
-rem [4/8] 数据目录（首次 initdb）+ 端口/监听
-rem ==========================================================================
 if exist "%PGDATA%\PG_VERSION" goto :step4_conf
 echo [4/8] 初始化数据库集群（首次运行）...
 echo         正在初始化 PostgreSQL 数据目录 ...
@@ -190,13 +148,17 @@ call :pgconf "port = %PGPORT%"
 call :pgconf "listen_addresses = '%PGHOST%'"
 echo [4/8] 端口 %PGPORT%，监听 %PGHOST%（已写入 postgresql.conf）
 
-rem ==========================================================================
-rem [5/8] 启动 PostgreSQL
-rem ==========================================================================
 echo [5/8] 启动 PostgreSQL ...
 echo         正在启动 PostgreSQL 服务 ...
+taskkill /f /im postgres.exe >nul 2>&1
+if exist "%PGDATA%\postmaster.pid" del /f /q "%PGDATA%\postmaster.pid" >nul 2>&1
+
+if exist "%LOGS%\pg.log" del /f /q "%LOGS%\pg.log" >nul 2>&1
+type nul > "%LOGS%\pg.log" 2>nul
+
 "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" status >nul 2>&1
 if not errorlevel 1 goto :step5_ok
+
 set "PGPORT_RETRIES=0"
 call :find_pgport
 if not defined FREEPORT set "TAILFILE=%TMPDIR%\pgport.err"
@@ -208,9 +170,8 @@ set "AUTO_PGPORT_CHANGED=1"
 >>"%PGDATA%\postgresql.conf" echo port = %PGPORT%
 if errorlevel 1 goto :err_pgconf
 :step5_start
-"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%LOGS%\pg.log" -w -t 60 -o "-p %PGPORT%" start
+"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -w -t 60 -o "-p %PGPORT%" start >> "%LOGS%\pg.log" 2>&1
 if not errorlevel 1 goto :step5_started
-set "TAILFILE=%LOGS%\pg.log"
 call :find_pgport
 if not defined FREEPORT goto :err_pgstart
 if "%FREEPORT%"=="%PGPORT%" goto :err_pgstart
@@ -229,9 +190,6 @@ if errorlevel 1 goto :err_pgportstate
 :step5_ok
 echo         已在运行: %PGHOST%:%PGPORT%
 
-rem ==========================================================================
-rem [6/8] 角色与数据库
-rem ==========================================================================
 set "PGPASSWORD=%PGPW%"
 "%PGBIN%\psql.exe" -h %PGHOST% -p %PGPORT% -U %PGSUPER% -d postgres -w -tAc "select 1 from pg_roles where rolname='%PGAPP%'" >"%TMPDIR%\role.txt" 2>"%TMPDIR%\role.err"
 if errorlevel 1 set "TAILFILE=%TMPDIR%\role.err"
@@ -256,7 +214,6 @@ if errorlevel 1 goto :err_pgdb
 :step6_verify
 set "PGPASSWORD=%APPPW%"
 "%PGBIN%\psql.exe" -h %PGHOST% -p %PGPORT% -U %PGAPP% -d %PGDB% -w -tAc "select 1" >"%TMPDIR%\app.txt" 2>"%TMPDIR%\app.err"
-rem [FIX] 应用口令验证完立即清空 PGPASSWORD，避免驻留环境变量被后续子进程继承
 set "PGPASSWORD="
 if errorlevel 1 goto :warn_appauth
 findstr /c:"1" "%TMPDIR%\app.txt" >nul
@@ -264,9 +221,6 @@ if errorlevel 1 goto :warn_appauth
 echo [6/8] 角色与数据库就绪，连接自检通过
 goto :step7
 
-rem ==========================================================================
-rem [7/8] config.json
-rem ==========================================================================
 :warn_appauth
 echo [警告] 角色 %PGAPP% 无法用 secrets\artex_pg.txt 里的口令登录 %PGDB%。
 echo        多半是该角色口令与文件不一致。两种修法：
@@ -294,7 +248,6 @@ mkdir "%PA%\config" 2>nul
 echo         已生成: %CONFIG%
 goto :step8
 :step7_fix
-rem skill_dir 优先级高于默认值，指向不存在的目录会让 skills 被静默跳过 —— 这里修掉
 set "CONFIG_NEEDS_UPDATE="
 findstr /i /c:"%SKILLS:\=/%" "%CONFIG%" >nul
 if errorlevel 1 set "CONFIG_NEEDS_UPDATE=1"
@@ -305,7 +258,6 @@ set "CONFIG_FIX=%CONFIG%"
 set "SKILL_DIR_NEW=%SKILLS:\=/%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=$env:CONFIG_FIX; try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json } catch { Write-Output ('CONFIG_PARSE_FAIL ' + $_.Exception.Message); exit 2 }; $j.skill_dir=$env:SKILL_DIR_NEW; if($env:AUTO_PGPORT_CHANGED -eq '1'){if(-not $j.database){Write-Output 'CONFIG_PARSE_FAIL missing database'; exit 3}; $j.database.port=[int]$env:PGPORT}; $t=($j | ConvertTo-Json -Depth 8); [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))" >"%TMPDIR%\configfix.txt" 2>&1
 set "CONFIGFIX_RC=%ERRORLEVEL%"
-rem [FIX] config.json 非法且需同步端口时硬失败，不能警告后继续导致端口不一致
 if not "%CONFIGFIX_RC%"=="0" if defined AUTO_PGPORT_CHANGED set "TAILFILE=%TMPDIR%\configfix.txt" & set "TAILN=10" & goto :err_config_port
 if not "%CONFIGFIX_RC%"=="0" goto :warn_config
 if defined AUTO_PGPORT_CHANGED echo         已同步数据库端口到 config.json: %PGPORT%
@@ -322,9 +274,6 @@ set "TAILFILE=%TMPDIR%\configfix.txt"
 if exist "%TMPDIR%\configfix.txt" call :tail
 goto :step8
 
-rem ==========================================================================
-rem [8/8] 启动 ARTEX + 初始化管理员
-rem ==========================================================================
 :step8
 echo [8/8] 启动 ARTEX ...
 echo         正在启动 ARTEX 后端服务 ...
@@ -431,9 +380,6 @@ echo.
 if defined OPENBROWSER start "" "%BASEURL%"
 goto :finish
 
-rem ==========================================================================
-rem 子过程
-rem ==========================================================================
 :genpass
 set "GENPASS="
 for /f "delims=" %%g in ('powershell -NoProfile -Command "([guid]::NewGuid().ToString()+[guid]::NewGuid().ToString()).Substring(0,28)"') do set "GENPASS=%%g"
@@ -463,9 +409,6 @@ goto :eof
 powershell -NoProfile -Command "if(Test-Path -LiteralPath $env:TAILFILE){ Get-Content -LiteralPath $env:TAILFILE -Tail %TAILN% }" 2>nul
 goto :eof
 
-rem ==========================================================================
-rem 错误分支
-rem ==========================================================================
 :err_nopa
 echo [错误] 找不到 %PA%
 echo        请把 install.bat 放在 ARTEX 仓库根目录（与 pentest-ai\ 同级）后重试。
@@ -473,7 +416,7 @@ goto :fail
 
 :err_pgdownload
 if exist "%PGPART%" del "%PGPART%" >nul 2>&1
-echo [错误] PostgreSQL 17.12 下载失败。请检查网络后重试。
+echo [错误] PostgreSQL 下载失败。请检查网络后重试。
 goto :fail
 
 :err_pgextract
@@ -574,9 +517,6 @@ echo [错误] 管理员密码已重置，但无法写入密码文件。
 echo        本次新密码为: %ADMINPW%
 goto :fail
 
-rem ==========================================================================
-rem 收尾
-rem ==========================================================================
 :fail
 echo.
 echo [失败] 安装/启动未完成。详细日志: %LOGS%
