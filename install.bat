@@ -248,23 +248,27 @@ mkdir "%PA%\config" 2>nul
 echo         已生成: %CONFIG%
 goto :step8
 :step7_fix
-set "CONFIG_NEEDS_UPDATE="
-findstr /i /c:"%SKILLS:\=/%" "%CONFIG%" >nul
-if errorlevel 1 set "CONFIG_NEEDS_UPDATE=1"
-if defined AUTO_PGPORT_CHANGED set "CONFIG_NEEDS_UPDATE=1"
-if not defined CONFIG_NEEDS_UPDATE goto :step7_ok
-echo         正在更新 config.json 配置 ...
+rem config.json 里的数据库端口必须和本次实际启动的端口一致：安装脚本用
+rem -o "-p %PGPORT%" 覆盖了 postgresql.conf 启动，只改 conf 不同步 config.json
+rem 时 backend 仍会去连旧端口（历史上出现过 config=5433、集群=5544 的分叉）。
 set "CONFIG_FIX=%CONFIG%"
 set "SKILL_DIR_NEW=%SKILLS:\=/%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=$env:CONFIG_FIX; try { $j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json } catch { Write-Output ('CONFIG_PARSE_FAIL ' + $_.Exception.Message); exit 2 }; $j.skill_dir=$env:SKILL_DIR_NEW; if($env:AUTO_PGPORT_CHANGED -eq '1'){if(-not $j.database){Write-Output 'CONFIG_PARSE_FAIL missing database'; exit 3}; $j.database.port=[int]$env:PGPORT}; $t=($j | ConvertTo-Json -Depth 8); [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))" >"%TMPDIR%\configfix.txt" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=$env:CONFIG_FIX; try{$j=Get-Content -Raw -LiteralPath $p | ConvertFrom-Json}catch{Write-Output ('CONFIG_PARSE_FAIL ' + $_.Exception.Message); exit 2}; if($null -eq $j.database){Write-Output 'CONFIG_PARSE_FAIL missing database'; exit 3}; $changes=@(); if(([string]$j.skill_dir) -ne $env:SKILL_DIR_NEW){$j.skill_dir=$env:SKILL_DIR_NEW; $changes+='skill_dir'}; $oldPort=[int]$j.database.port; if($oldPort -ne [int]$env:PGPORT){$j.database.port=[int]$env:PGPORT; $changes+=('database.port ' + $oldPort + ' to ' + $env:PGPORT)}; if($changes.Count -eq 0){Write-Output 'CONFIG_OK'; exit 0}; $t=($j | ConvertTo-Json -Depth 8); [System.IO.File]::WriteAllText($p,$t,(New-Object System.Text.UTF8Encoding($false))); Write-Output ('CONFIG_UPDATED ' + ($changes -join '; '))" >"%TMPDIR%\configfix.txt" 2>&1
 set "CONFIGFIX_RC=%ERRORLEVEL%"
-if not "%CONFIGFIX_RC%"=="0" if defined AUTO_PGPORT_CHANGED set "TAILFILE=%TMPDIR%\configfix.txt" & set "TAILN=10" & goto :err_config_port
-if not "%CONFIGFIX_RC%"=="0" goto :warn_config
-if defined AUTO_PGPORT_CHANGED echo         已同步数据库端口到 config.json: %PGPORT%
-echo         config.json 已更新（UTF-8 无 BOM）
+set "CONFIG_MSG="
+if exist "%TMPDIR%\configfix.txt" set /p CONFIG_MSG=<"%TMPDIR%\configfix.txt"
+if not "%CONFIGFIX_RC%"=="0" (
+  set "TAILFILE=%TMPDIR%\configfix.txt"
+  set "TAILN=10"
+  goto :err_config_port
+)
+if "%CONFIG_MSG%"=="CONFIG_OK" goto :step7_ok
+rem 用 type 打印，别用 echo %CONFIG_MSG%：消息里带 ">" 会让 cmd 当成重定向。
+echo         config.json 已更新：
+type "%TMPDIR%\configfix.txt"
 goto :step8
 :step7_ok
-echo         已存在且 skill_dir 正确: %SKILLS:\=/%"
+echo         已存在且端口/skill_dir 一致: %SKILLS:\=/%"
 goto :step8
 
 :warn_config
