@@ -5,12 +5,16 @@ import (
 	"testing"
 )
 
+func stripSafetyPrefix(s string) string {
+	return strings.TrimPrefix(s, SafetyLayer()+"\n\n")
+}
+
 func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	t.Cleanup(func() { PromptOverride = nil })
 
 	// no override → built-in default
 	PromptOverride = nil
-	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "g"}); got != "DEFAULT" {
+	if got := stripSafetyPrefix(renderSystem("planner", "DEFAULT", PlannerVars{Goal: "g"})); got != "DEFAULT" {
 		t.Fatalf("no override should give default, got %q", got)
 	}
 
@@ -21,13 +25,13 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 		}
 		return "", false
 	}
-	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "拿下X", Scope: "*.x.com"}); got != "目标:拿下X 范围:*.x.com" {
+	if got := stripSafetyPrefix(renderSystem("planner", "DEFAULT", PlannerVars{Goal: "拿下X", Scope: "*.x.com"})); got != "目标:拿下X 范围:*.x.com" {
 		t.Fatalf("override render: %q", got)
 	}
 
 	// override referencing a non-catalog var → execution error → fallback to default
 	PromptOverride = func(k string) (string, bool) { return "{{.NotInCatalog}}", true }
-	if got := renderSystem("planner", "DEFAULT", PlannerVars{Goal: "x"}); got != "DEFAULT" {
+	if got := stripSafetyPrefix(renderSystem("planner", "DEFAULT", PlannerVars{Goal: "x"})); got != "DEFAULT" {
 		t.Fatalf("bad var should fall back to default, got %q", got)
 	}
 
@@ -35,7 +39,7 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	// [C] (中间产物输出规约) is ALWAYS appended — editing the body can't drop it.
 	PromptOverride = func(k string) (string, bool) { return "PLANNER {{.Goal}}", true }
 	got := plannerSystem("拿下X", "/data", "/data")
-	if !strings.HasPrefix(got, "PLANNER 拿下X") {
+	if !strings.HasPrefix(stripSafetyPrefix(got), "PLANNER 拿下X") {
 		t.Fatalf("plannerSystem body not honored: %q", got)
 	}
 	if !strings.Contains(got, "中间产物输出规约") || !strings.Contains(got, "/data") {
@@ -51,7 +55,7 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 		return "{{if .ProxyAddr}}走代理 {{.ProxyAddr}}{{else}}手动{{end}}", true
 	}
 	recording := workerSystem("127.0.0.1:8080", "/ca.pem", "/data", "/data", false)
-	if !strings.HasPrefix(strings.TrimPrefix(recording, ToolRoutingHeader), "走代理 127.0.0.1:8080") {
+	if !strings.HasPrefix(stripSafetyPrefix(strings.TrimPrefix(recording, ToolRoutingHeader)), "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker proxy branch body: %q", recording)
 	}
 	if !strings.Contains(recording, "traffic_search") {
@@ -66,18 +70,28 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	// Egress proxy set but capture OFF (no CA): the ProxyAddr template branch still
 	// renders, but the trafficTool block must NOT — those tools are not registered.
 	egressOnly := workerSystem("127.0.0.1:8080", "", "/data", "/data", false)
-	if !strings.HasPrefix(strings.TrimPrefix(egressOnly, ToolRoutingHeader), "走代理 127.0.0.1:8080") {
+	if !strings.HasPrefix(stripSafetyPrefix(strings.TrimPrefix(egressOnly, ToolRoutingHeader)), "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker egress-only branch body: %q", egressOnly)
 	}
 	if strings.Contains(egressOnly, "traffic_search") {
 		t.Fatalf("worker without recording must NOT inject trafficTool: %q", egressOnly)
 	}
 	noProxy := workerSystem("", "", "/data", "/data", false)
-	if !strings.HasPrefix(strings.TrimPrefix(noProxy, ToolRoutingHeader), "手动") {
+	if !strings.HasPrefix(stripSafetyPrefix(strings.TrimPrefix(noProxy, ToolRoutingHeader)), "手动") {
 		t.Fatalf("worker no-proxy branch body: %q", noProxy)
 	}
 	if strings.Contains(noProxy, "traffic_search") {
 		t.Fatalf("worker without proxy must NOT inject trafficTool: %q", noProxy)
+	}
+}
+
+func TestBuiltinPromptBodiesExcludeSafetyScript(t *testing.T) {
+	for key, body := range BuiltinPromptSeeds() {
+		for _, marker := range []string{"系统终极最高特权指令", "全局非拒绝层", "写入新的拒绝层", "- 拒绝就是拒绝。"} {
+			if strings.Contains(body, marker) {
+				t.Errorf("built-in prompt %q contains removed prompt text %q", key, marker)
+			}
+		}
 	}
 }
 
@@ -103,7 +117,7 @@ func TestWorkerSystemIntranetVariant(t *testing.T) {
 		}
 		return "", false
 	}
-	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(strings.TrimPrefix(got, ToolRoutingHeader), "内网正文 true") {
+	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(stripSafetyPrefix(strings.TrimPrefix(got, ToolRoutingHeader)), "内网正文 true") {
 		t.Fatalf("worker.intranet override should win: %q", got)
 	}
 	if !strings.Contains(got, "内网红线") {
@@ -116,7 +130,7 @@ func TestWorkerSystemIntranetVariant(t *testing.T) {
 		}
 		return "", false
 	}
-	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(strings.TrimPrefix(got, ToolRoutingHeader), "外网正文") {
+	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(stripSafetyPrefix(strings.TrimPrefix(got, ToolRoutingHeader)), "外网正文") {
 		t.Fatalf("missing variant should fall back to worker key: %q", got)
 	}
 	// intranet=false 不追加红线尾。
