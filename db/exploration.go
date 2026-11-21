@@ -229,6 +229,26 @@ func (s *ExplorationStore) AddGoal(payload map[string]any, origin string) (int64
 	return s.AddNode("goal", payload, 0, "open", origin, nil)
 }
 
+// CountUnsuccessfulIntents 统计本探索里已经失败收场的意图数（blocked/exhausted/stopped）。
+// 自研触发用它判断「是不是一直打不进去」。
+func (s *ExplorationStore) CountUnsuccessfulIntents() (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('blocked','exhausted','stopped')`, s.expID).Scan(&n)
+	return n, err
+}
+
+// CountSelfEvolveIntents 统计本探索里已经派发过的自研意图数，用来给强制自研设上限，
+// 避免同一任务无限自研。
+func (s *ExplorationStore) CountSelfEvolveIntents() (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND payload->>'self_evolve' = 'true'`, s.expID).Scan(&n)
+	return n, err
+}
+
 // OriginFactID returns this exploration's root fact id — the KindFact node with
 // state='origin' seeded at task creation (the task root). Every intent traces
 // back to it. Returns 0 (no error) when none exists (legacy explorations created

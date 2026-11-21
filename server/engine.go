@@ -1020,9 +1020,97 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 	}
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
+	e.maybeQueueSelfEvolve(t, intent, state, err)
 	e.touch(t.ID)
 	t.NotifyDone(intent.ID)
 	return true
+}
+
+// 自研触发阈值：同一任务累计失败意图数达到它就强制进入自研模式；同一任务最多
+// 派发 2 条自研意图，防止「自研脚本也失败 → 又自研」的无限递归。
+const (
+	selfEvolveFailThreshold = 2
+	selfEvolveMaxPerTask    = 2
+)
+
+// maybeQueueSelfEvolve 是「AI 改 AI」的执行层：er 意图以 blocked/exhausted 收场、
+// 且本任务累计失败已达阈值时，直接派一条 action=self_evolve 的意图，强制 worker
+// 现场写脚本（skill_draft → skill_test → skill_promote）而不是继续报失败。
+func (e *Engine) maybeQueueSelfEvolve(t *Task, intent *db.Node, state string, runErr error) {
+	if t == nil || t.Store == nil || intent == nil || !agent.SelfEvolveEnabled() {
+		return
+	}
+	if state != "blocked" && state != "exhausted" {
+		return
+	}
+	if agent.IntentIsSelfEvolve(intent) {
+		return // 自研意图自己失败也要收口，不再递归派发
+	}
+	fails, err := t.Store.CountUnsuccessfulIntents()
+	if err != nil || fails < selfEvolveFailThreshold {
+		return
+	}
+	dispatched, err := t.Store.CountSelfEvolveIntents()
+	if err != nil || dispatched >= selfEvolveMaxPerTask {
+		return
+	}
+	target := intentTargetText(intent)
+	reason := state
+	if runErr != nil {
+		reason = runErr.Error()
+	}
+	reason = strings.TrimSpace(reason)
+	if len(reason) > 300 {
+		reason = reason[:300]
+	}
+	anchors, _ := t.Store.Anchors(intent.ID)
+	payload := map[string]any{
+		"task":        fmt.Sprintf("【自研模式】针对 %s 现场编写并验证一个专用脚本：skill_draft → skill_test → skill_promote，然后用它继续推进攻击链", target),
+		"action":      "self_evolve",
+		"self_evolve": true,
+		"target":      target,
+		"fail_reason": reason,
+		"instruction": "不要报告失败。先 skill_draft 写 Python/Bash 脚本，skill_test 真跑验证，跑通后 skill_promote 固化进工具表，再继续攻击（提权/横向/取证）。最多 2 条脚本。",
+		"asset_ids":   anchors,
+	}
+	id, err := t.Store.AddIntent(payload, 8, anchors, "self-evolve")
+	if err != nil {
+		log.Printf("[self-evolve] task %s 派发自研意图失败: %v", t.ID, err)
+		return
+	}
+	log.Printf("[self-evolve] task %s 连续 %d 条意图失败 → 派发自研意图 #%d (target=%s)", t.ID, fails, id, target)
+	e.emitActivity(t, db.Activity{
+		Worker:  "system",
+		Kind:    "system",
+		Summary: fmt.Sprintf("【自启自研】连续 %d 条意图失败，派发自研意图 #%d：%s", fails, id, target),
+		Detail:  reason,
+	})
+	if _, err := t.Store.AddNode(db.KindHint, map[string]any{"text": fmt.Sprintf(
+		"【自研触发】意图 #%d 以 %s 收场且本任务累计失败 %d 条，平台已派发自研意图 #%d：要求现场编写并验证专用脚本后再推进。规划时不要再排同轴同参的重复探测。",
+		intent.ID, state, fails, id)}, 0, "active", "system", nil); err != nil {
+		log.Printf("[self-evolve] task %s 自研 hint 写图失败: %v", t.ID, err)
+	}
+}
+
+// intentTargetText 从意图 payload 里抽目标（url/host/target/domain 任一），抽不到就用
+// summary，再兜底一句通用描述——自研提示词只需要一个可读的目标标识。
+func intentTargetText(intent *db.Node) string {
+	if intent == nil || len(intent.Payload) == 0 {
+		return "当前目标"
+	}
+	var p map[string]any
+	if json.Unmarshal(intent.Payload, &p) != nil {
+		return "当前目标"
+	}
+	for _, k := range []string{"target", "url", "host", "domain"} {
+		if v, ok := p[k].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	if v, ok := p["summary"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return "当前目标"
 }
 
 func specialIntentAction(intent *db.Node) string {

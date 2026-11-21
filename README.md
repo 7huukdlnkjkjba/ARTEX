@@ -28,6 +28,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.27** | **AI 改 AI：基因组与成本进化**：新增 `genome_*` 表、表型采样、纯 SQL 成本归因与 `evolve_*` 工具（leaks/begin/read/propose/trial/compare/promote/abandon）；只能改 prompt/skill 文本，晋升由 Go 按净收益判定 |
 | **v0.3.28** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
 | **v0.3.29** | **服务端API破甲层提示词**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，![手动复制提示词](https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)|
+| **v0.3.30** | **AI 改 AI：自研闭环**：废弃 `genome_*` 表与 `evolve_*` 工具，改为 `skill_draft`（现场写脚本）/ `skill_test`（真跑验证）/ `skill_promote`（注册成全局工具）；连续 2 条意图打不动时引擎强制派发自研意图，worker 提示词内置【渗透自进化核心协议】 |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -39,7 +40,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - 内网原生协议与 AS-REP（`raw_tcp` / `ad_asreproast` / `ad_dcsync`）：见下文「内网原生协议与 AS-REP（0.3.24）」
 - 受控 Web 利用与 impacket 隧道（`sqlmap_run` / `nuclei_run` / `impacket_proxy`）：见下文「受控 Web 利用与 impacket 隧道（0.3.25）」
 - DB / 隐写 / Windows 注入（`db_dump` / `png_stego` / `win_inject`）：见下文「DB、隐写与 Windows 注入（0.3.26）」
-- AI 改 AI：基因组与成本进化（`evolve_*`）：见下文「AI 改 AI：基因组与成本进化（0.3.27）」
+- AI 改 AI：自研闭环（`skill_draft` / `skill_test` / `skill_promote`）：见下文「AI 改 AI：自研闭环（skill_draft / skill_test / skill_promote）」
 - 前端源码审计（`web_audit`）：见下文「前端源码审计（0.3.28）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
@@ -498,47 +499,39 @@ tunnel_deploy / session_exec 确认可达
 
 ---
 
-## AI 改 AI：基因组与成本进化（0.3.27）
+## AI 改 AI：自研闭环（skill_draft / skill_test / skill_promote）
 
-这一层让 AI 在**不碰 Go/SQL/guard/scope** 的前提下改 prompt/skill，并且只有成本净收益为正才晋升。
+旧版的 `genome_*` 表 + `evolve_*` 工具（0.3.27 的「基因组与成本进化」）已整体下线：它只能改文本、晋升还要等成本样本，实战价值低。现在的自研闭环走**造工具**这条路：
 
-### 数据与表型
+```
+Worker 打不动目标（WAF 拦截 / 无现成 POC / 端口被过滤 / 提权失败）
+  → skill_draft  写一个只针对该目标的 Python / Bash 脚本到 skills/dynamic/<name>/
+  → skill_test   立刻执行，拿真实 stdout/stderr/exit code
+  → skill_promote 注册进 tools 表（kind=script/command），全任务 worker 立即可用
+  → 用新工具继续攻击链（提权 / 横向 / 取证）
+```
 
-- `genome_genes`：`gene_key + revision`，内容 SHA-256、content_ref、parent_rev、status（active/shadow/retired）。
-- `genome_phenotypes`：每个任务终态记录 `genome_snapshot`（各基因 revision）+ `fitness`（cost/cache/turns/rework）。
-- `genome_events`：mutation/selection/retirement/drift/shadow 审计。
-- `evolve_runs` / `evolve_proposals` / `evolve_trials` / `evolve_costs`：提案、离线验证、进化花费。
-- 任务进入 done/failed/timeout 等终态时，`recordTaskPhenotype` 异步采样 `llm_usage` 的 token/cache、按 `cost.Config` 折算 CNY；失败只记日志，不改任务状态。
-
-### 成本归因（零 LLM）
-
-`FindCostLeaks` 纯 SQL 找：
-
-1. 近 7 天缓存命中率 < 50%；
-2. 近 3 天 input token 比之前高 20%+；
-3. 单任务成本 > 均值 2 倍；
-4. 同一任务相同 intent summary 重复派发 ≥3 次；
-5. 返工次数高于中位数。
-
-### `evolve_*` 工具
+### 三个工具
 
 | 工具 | 作用 |
 |---|---|
-| `evolve_leaks` | 纯 SQL 归因，返回烧钱点 |
-| `evolve_begin` | 预算闸门（任务成本 ≥¥0.5、进化花费 ≤5%）后选最贵 leak，建 `evolve_runs` |
-| `evolve_read` | 只读 `agent/prompts/`、`.agents/skills/`、`skills/` 文本（≤64KB，路径越界拒绝） |
-| `evolve_propose` | 写最小改动提案；必须带 `evidence_ids`、`validation_metric`、`rollback_condition` |
-| `evolve_trial` | 零 LLM 静态验证：token 增长 ≤10%、缓存前缀不变、工具提及不增加；必须 `confirm=true` |
-| `evolve_compare` | 基线 vs 变体成本档案；样本不足返回 `enter_shadow`，**不伪造样本**；Go 代码判 pass/fail |
-| `evolve_promote` | 只对 accepted 且净收益重新核验为正的提案写回；写前备份，写后登记 revision/retire/selection |
-| `evolve_abandon` | 标 retired 并记 retirement 事件 |
+| `skill_draft` | 写 `skills/dynamic/<name>/<name>.py\|.sh` + SKILL.md；名字白名单校验，单脚本 ≤256KB |
+| `skill_test` | 唯一执行入口：带超时（默认 300s、上限 1800s）与 64KB 输出上限，回传真实 exit code |
+| `skill_promote` | 把脚本注册成全局自定义工具（`sk_` 前缀、默认绑 `worker`）；同名重复晋升覆盖执行规格 |
+
+### 强制触发
+
+`server/engine.go` 里，意图以 `blocked` / `exhausted` 收场、且本任务累计失败意图
+≥2 条时，引擎直接派一条 `action=self_evolve` 的意图（每任务上限 2 条，不递归），
+worker 的系统提示里有代码固定的【渗透自进化核心协议】，要求它先写脚本再继续。
 
 ### 硬边界
 
-- 只能改 `agent/prompts/`、`.agents/skills/`、`skills/` 下的文本；不能改 `.go`/SQL/二进制/guard/scope/RoE。
-- 晋升不是模型宣布：`CostAwareVerdict` 要求新版本不更贵、缓存命中不下降 >10%、轮次不增加、净收益 > 0。
-- 没有真实 shadow 样本时 `evolve_compare` 只能返回 `enter_shadow`；当前 Phase 1 不自动派发 shadow worker，因此不会伪造“省钱了”的结论。
-- 方法论模板：[agent/prompts/self_evolve_prompt.md](agent/prompts/self_evolve_prompt.md)；运维查账：[scripts/evolve_costs.sql](scripts/evolve_costs.sql)。
+- 自研脚本只能写 `skills/dynamic/`；不能改 `.go`/SQL/guard/scope/RoE。
+- `skill_promote` 只注册 `system=false` 的自定义工具，`sk_` 前缀不会覆盖内置工具。
+- 已晋升的 Python 工具把脚本正文内联进 `exec`；Bash 工具按绝对路径调用——删文件不会让工具悄悄失效。
+- 关闭开关：`ARTEX_SELF_EVOLVE=off`（整条链路），`ARTEX_SELF_EVOLVE_SEED=off`（只关合成记忆）。
+
 
 ---
 
@@ -566,7 +559,7 @@ tunnel_deploy / session_exec 确认可达
 
 这些能力在补齐“真实 lockout 策略读取 + dry-run 默认 + 显式 confirm + 证据回写”之前，继续走 `exploit_author` / `session_exec` / `msf_execute` 或人工外部工具。
 
-`raw_tcp` / `sqlmap_run` / `nuclei_run` / `web_audit` / `impacket_proxy` / `db_dump` / `png_stego` / `win_inject` / `evolve_*` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
+`raw_tcp` / `sqlmap_run` / `nuclei_run` / `web_audit` / `impacket_proxy` / `db_dump` / `png_stego` / `win_inject` / `skill_draft` / `skill_test` / `skill_promote` 在启动时 seed 进 `tools` 表并默认绑定 `worker`；`ad_asreproast` / `ad_dcsync` 属于内置工具，同样在启动时 seed。**重启 ARTEX 后生效**，无需 SQL 迁移。
 
 ---
 
