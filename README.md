@@ -25,10 +25,9 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.24** | **内网原生协议 + AS-REP + DCSync**：新增 `raw_tcp`（SMB2/LDAP/TDS/MySQL/raw hex 原生 TCP 探测，自动走任务隧道 SOCKS5，代码构造与指纹，不做认证/利用）、`ad_asreproast`（T1558.004 AS-REP Roasting）与 `ad_dcsync`（T1003.006，必须显式 confirm，哈希不写 finding evidence） |
 | **v0.3.25** | **受控 Web 利用与 impacket 隧道**：新增 `sqlmap_run`（detect/dbs/current-user/is-dba/dump，dump 需 confirm+table）、`nuclei_run`（JSONL 解析、限速、关 interactsh）与 `impacket_proxy`（Linux/proxychains + 任务 SOCKS5，让 impacket 进隔离内网） |
 | **v0.3.26** | **DB / 隐写 / Windows 注入**：新增 `db_dump`（MySQL/PostgreSQL 只读直连，list/dump、标识符转义、行/单元格上限、dump 需 confirm）、`png_stego`（PNG LSB 隐藏/提取，SHA-256）与 `win_inject`（Windows-only CreateRemoteThread，process_name 校验 + confirm，dry_run） |
-| **v0.3.27** | **AI 改 AI：基因组与成本进化**：新增 `genome_*` 表、表型采样、纯 SQL 成本归因与 `evolve_*` 工具（leaks/begin/read/propose/trial/compare/promote/abandon）；只能改 prompt/skill 文本，晋升由 Go 按净收益判定 |
+| **v0.3.27** |**AI 改 AI：渗透自研闭环**：废弃 `genome_*` 表与 `evolve_*` 工具，改为 `skill_draft`（现场写脚本）/ `skill_test`（真跑验证）/ `skill_promote`（注册成全局工具）；连续 2 条意图打不动时引擎强制派发自研意图，worker 提示词内置【渗透自进化核心协议】 |
 | **v0.3.28** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
 | **v0.3.29** | **服务端API破甲层提示词**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，![手动复制提示词](https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)|
-| **v0.3.30** | **AI 改 AI：自研闭环**：废弃 `genome_*` 表与 `evolve_*` 工具，改为 `skill_draft`（现场写脚本）/ `skill_test`（真跑验证）/ `skill_promote`（注册成全局工具）；连续 2 条意图打不动时引擎强制派发自研意图，worker 提示词内置【渗透自进化核心协议】 |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
