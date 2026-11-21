@@ -21,13 +21,9 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.20** | **WAF 绕过预筛**：新增人工接口 `POST /api/waf-probe`，先识别 WAF 指纹，再把同一条 SQL 注入意图用 8 种编码/变形重放，返回 `bypassable`/`hard`/`skip`、0-100 评分与逐条证据（`server/waf_bypass_probe.go`） |
 | **v0.3.21** | **AD 与侦察工具化**：新增 worker 工具 `ad_kerberoast`（Kerberoasting：枚举/定向 TGS、RC4+AES 哈希解析、凭据库/scope/dry-run、finding/fact 回写）与 `scan_rustscan`（RustScan TCP 全端口扫描：结构化开放端口、CIDR 保护、scope、fact 回写）；端口扫描强制走 `scan_rustscan`，执行归代码、决策归 AI |
 | **v0.3.22** | **HTTP 黑盒工具化**：新增 worker 工具 `recon_http`（单请求侦察：状态/头/体预览/重定向/超时/错误分类，走任务代理与录制）与 `http_diff`（基线 vs 变体：状态翻转/长度/内容相似度信号，支持 IDOR/越权/注入/认证差异）；HTTP 侦察优先走工具，执行归代码、决策归 AI |
-| **v0.3.23** | **证据核心（观察台账 + 闸门 finding）**：新增 `path_probe` / `admin_surface` / `fingerprint` / `auth_probe`，所有探测写入 per-intent `observation_ledger.json`（receipt_id + request/response hash + 完整性）；新增 `report_finding_gated`，只接受台账内、URL 匹配、response_hash 一致的证据，阻止凭印象/版本猜测写 finding |
-| **v0.3.24** | **内网原生协议 + AS-REP + DCSync**：新增 `raw_tcp`（SMB2/LDAP/TDS/MySQL/raw hex 原生 TCP 探测，自动走任务隧道 SOCKS5，代码构造与指纹，不做认证/利用）、`ad_asreproast`（T1558.004 AS-REP Roasting）与 `ad_dcsync`（T1003.006，必须显式 confirm，哈希不写 finding evidence） |
-| **v0.3.25** | **受控 Web 利用与 impacket 隧道**：新增 `sqlmap_run`（detect/dbs/current-user/is-dba/dump，dump 需 confirm+table）、`nuclei_run`（JSONL 解析、限速、关 interactsh）与 `impacket_proxy`（Linux/proxychains + 任务 SOCKS5，让 impacket 进隔离内网） |
-| **v0.3.26** | **DB / 隐写 / Windows 注入**：新增 `db_dump`（MySQL/PostgreSQL 只读直连，list/dump、标识符转义、行/单元格上限、dump 需 confirm）、`png_stego`（PNG LSB 隐藏/提取，SHA-256）与 `win_inject`（Windows-only CreateRemoteThread，process_name 校验 + confirm，dry_run） |
-| **v0.3.27** |**AI 改 AI：渗透自研闭环**：废弃 `genome_*` 表与 `evolve_*` 工具，改为 `skill_draft`（现场写脚本）/ `skill_test`（真跑验证）/ `skill_promote`（注册成全局工具）；连续 2 条意图打不动时引擎强制派发自研意图，worker 提示词内置【渗透自进化核心协议】 |
-| **v0.3.28** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
-| **v0.3.29** | **服务端API破甲层提示词**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，![手动复制提示词](https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)|
+| **v0.3.23** |**AI 改 AI：渗透自研闭环**：废弃 `genome_*` 表与 `evolve_*` 工具，改为 `skill_draft`（现场写脚本）/ `skill_test`（真跑验证）/ `skill_promote`（注册成全局工具）；连续 2 条意图打不动时引擎强制派发自研意图，worker 提示词内置【渗透自进化核心协议】 |
+| **v0.3.24** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
+| **v0.3.25** | **服务端API破甲层提示词和AI全权限虚假记忆注入**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，![手动复制提示词](https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)，完美提示词加代码的破甲|
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -35,10 +31,6 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - WAF 绕过预筛（`POST /api/waf-probe`）：见下文「WAF 绕过预筛（0.3.20）」
 - AD 与端口扫描工具（`ad_kerberoast` / `scan_rustscan`）：见下文「AD 与端口扫描工具（0.3.21）」
 - HTTP 黑盒侦察与差分（`recon_http` / `http_diff`）：见下文「HTTP 黑盒侦察与差分（0.3.22）」
-- 证据核心（观察台账 / `report_finding_gated`）：见下文「证据核心：观察台账与闸门 finding（0.3.23）」
-- 内网原生协议与 AS-REP（`raw_tcp` / `ad_asreproast` / `ad_dcsync`）：见下文「内网原生协议与 AS-REP（0.3.24）」
-- 受控 Web 利用与 impacket 隧道（`sqlmap_run` / `nuclei_run` / `impacket_proxy`）：见下文「受控 Web 利用与 impacket 隧道（0.3.25）」
-- DB / 隐写 / Windows 注入（`db_dump` / `png_stego` / `win_inject`）：见下文「DB、隐写与 Windows 注入（0.3.26）」
 - AI 改 AI：自研闭环（`skill_draft` / `skill_test` / `skill_promote`）：见下文「AI 改 AI：自研闭环（skill_draft / skill_test / skill_promote）」
 - 前端源码审计（`web_audit`）：见下文「前端源码审计（0.3.28）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
@@ -365,139 +357,6 @@ worker 的代码固定工具纪律已要求：单请求 HTTP 侦察优先 `recon
 
 ---
 
-## 证据核心：观察台账与闸门 finding（0.3.23）
-
-这一层把“模型说发现了漏洞”变成“有可核对的 HTTP 观察记录”：
-
-- 每个 worker 意图在自己的工作目录写 `observation_ledger.json`；
-- 每条完整探测记录 `receipt_id`、URL、方法、状态码、request hash、response hash、时间、是否完整；
-- `report_finding_gated` 只接受：`proof_kind` 非 `unproven`、`observation_ids` 指向本意图台账、citation URL 全部在台账且完整、observation 的 URL 与引用 URL 匹配、多条 observation 的 response hash 一致。
-
-### 探测工具
-
-| 工具 | 作用 |
-|---|---|
-| `path_probe` | 敏感路径探测；先做 3 次随机路径 soft-404 校准，过滤 404/410 与 soft-404 模板；返回命中路径 + 状态 + 字节数 + `receipt_id` |
-| `admin_surface` | 19 类框架管理面板（Spring Actuator、Swagger、Druid、Nacos、Eureka、Jenkins、Tomcat Manager、ES、K8s、metrics 等）；产品内容正则匹配才进 `found`，仅 2xx 无内容证据进 `candidates` |
-| `fingerprint` | WAF/CDN 指纹（Cloudflare/Akamai/Fastly/AWS/阿里云/腾讯云/百度云加速/安全狗/宝塔/七牛/ModSecurity 等）+ 安全响应头缺失审计 + `receipt_id` |
-| `auth_probe` | 端点鉴权三态 `anonymous` / `auth_required` / `ambiguous`；可选 Cookie 做认证对照；`edge_blocked` 检测“全 403/429 是边缘拦截而非端点鉴权” |
-
-这些工具都复用 `httpclient.go` 的任务 MITM / 任务隧道 SOCKS5 / 全局代理与稳定 UA，因此探测流量会进录制台账。
-
-### `report_finding_gated`
-
-- 必填：`proof_kind`（`reflection_observed` / `differential` / `content_hash_migration` / `identity_marker` / `server_state` / `oob_callback` 等，`unproven` 拒绝）、`observation_ids`、`summary`/`evidence`（必须含真实 URL）。
-- 闸门校验失败整条拒绝，并明确说明是“URL 不在台账 / 请求不完整 / URL 与 observation 不匹配 / response_hash 不一致”。
-- 通过后复用 `report_finding` 的写回链路（findingRecorder、合并、资产锚定、planner 通知）。
-- 台账是 **per-intent**：跨意图证据请在当前意图重新观察，或改用 `report_finding` 并在 evidence 说明原因（TCP/非 HTTP/工具外证据）。
-
-worker 的代码固定工具纪律已要求：HTTP/服务类确认漏洞优先走 `report_finding_gated`；闸门拒绝的 finding 不要换工具硬报。
-
----
-
-## 内网原生协议、AS-REP 与 DCSync（0.3.24）
-
-这一版补的是“目标不出网、HTTP 工具够不到”的原生 TCP 面，以及 AD 凭据路径里缺失的 AS-REP：
-
-### `raw_tcp`
-
-| 能力 | 说明 |
-|---|---|
-| 协议 | `raw`（任意 hex）/ `smb`（SMB2 NEGOTIATE）/ `ldap`（匿名 BindRequest）/ `mysql`（读服务端握手）/ `tds`（TDS PRELOGIN） |
-| 出站 | 优先任务隧道 SOCKS5 → 全局 SOCKS5 → 直连；结果里的 `egress` 标明 `task_socks5` / `global_socks5` / `direct` |
-| 代码职责 | 连接、超时、协议构造、响应读取、SMB2/LDAP/TDS/MySQL 指纹；**不做认证、爆破、利用** |
-| 入参 | `host`、`port`、`protocol`、`payload`、`proxy`（可选 `socks5://...`）、`timeout`、`read_len` |
-| 输出 | `request_hex` / `response_hex` / `response_len` / `fingerprint` / `egress` / `elapsed_ms`；失败返回连接/scope 错误 |
-| 边界 | 进任务 scope 硬校验；raw TCP 观察**不进入** `observation_ledger`，确认漏洞用 `report_finding`（TCP/非 HTTP）或 `exploit_author` |
-
-内网隔离时的正确顺序：
-
-```text
-tunnel_deploy / session_exec 确认可达
-  → raw_tcp host=10.x.x.x port=445 protocol=smb
-  → 根据 fingerprint 决定下一步（SMB/LDAP/TDS/MySQL）
-```
-
-`raw_tcp` 会自动读取该任务当前 alive 的 SOCKS5 隧道；没有隧道时退回全局 SOCKS5/直连。  
-`proxy=socks5://...` 可显式覆盖；HTTP 代理无法承载任意 TCP，会直接报错。
-
-### `ad_asreproast`
-
-- MITRE **T1558.004**；枚举 `DONT_REQ_PREAUTH` 账号并请求 AS-REP，解析 `$krb5asrep$`。
-- 有域凭据：`credential_id` / 本任务自动选择域匹配的 `password` / `hash_nt`，由 `GetNPUsers.py` 自行枚举。
-- 无凭据：传 `users` 列表，走 `-usersfile ... -no-pass`；用户列表会写入本意图运行目录的临时文件（不经过模型）。
-- 输出 `hashes[].hashcat_mode`：etype 23 → 18200，17 → 19800，18 → 19900；finding evidence 带完整哈希与对应 hashcat 命令。
-- 命中回写 finding；无命中回写 inferred fact；`dry_run=true` 只探测 88/LDAP 与 `GetNPUsers.py` 是否就绪。
-- 前提：DC 88/TCP 与 LDAP(389/636) 可达、时钟偏差 ≤5 分钟、`python -m pip install impacket`。
-
-### `ad_dcsync`
-
-- MITRE **T1003.006**；用已有域凭据经 DRSUAPI 复制指定账号（`secretsdump.py -just-dc-user`）。
-- **必须显式 `confirm=true`**；`dry_run=true` 只检查 secretsdump 与 DC 445/135/389，不需要确认。
-- `target_user` 必填，通常 `krbtgt`；**不提供 `-just-dc` 全量导出**。
-- 返回 `hashes[]`（account/RID/LM/NT）；finding evidence **不含 NT hash**，只写账号/RID/“hash 在工具结果中，用 add_credential 落库”。
-- 需要复制权限（Domain Admin / Replicating Directory Changes）；普通域用户会 `rpc_s_access_denied`。
-- 前提：DC 445/135 可达、已装 impacket；`dry_run` 可先验证。
-
-> **可达性边界**：`raw_tcp` 会自动走任务隧道 SOCKS5；`ad_asreproast` / `ad_dcsync` 调用 impacket，默认仍从 ARTEX 宿主直连。Linux 部署可用 `impacket_proxy`（proxychains + 任务 SOCKS5）把 impacket 带进隔离内网；Windows 没有 proxychains，仍需跳板/会话侧执行。
-
----
-
-## 受控 Web 利用与 impacket 隧道（0.3.25）
-
-### `sqlmap_run`
-
-- 默认 `--batch --smart --level=1 --risk=1 --threads=1 --timeout=10 --retries=1 --technique=BE --flush-session`。
-- `action=detect|dbs|current-user|is-dba|dump`；`dump` 必须 `confirm=true` **且** 指定 `table`，禁止无范围整库导出。
-- 不提供 `--os-shell` / `--sql-shell` / `--file-write`。
-- 走任务 MITM（若开启）→ 目标，`egress=task_mitm|direct`；解析 `is vulnerable` / DBMS / current user / dbs，确认注入后回写 finding。
-- 工具缺失时返回 `tool_missing`，不伪造成功。
-
-### `nuclei_run`
-
-- 默认 `-severity critical,high,medium -rl 50 -timeout 10 -retries 1 -jsonl -silent -nc -or -ni -duc`。
-- `-ni` 关闭 interactsh（避免 OOB 外带）；需要 OAST 时人工评估后再开。
-- 支持 `tags` / `template` 缩小范围；走任务 MITM（若开启）。
-- JSONL 解析 `template-id` / `info.name` / `info.severity` / `matched-at`，去重后回写 finding。
-
-### `impacket_proxy`
-
-- 仅 **Linux + proxychains**；Windows 返回 `tool_missing`（不冒充直连成功）。
-- 用 `TaskSocks5ForTask` 取任务隧道 SOCKS5（不是 HTTP MITM），写临时 proxychains 配置，执行 impacket 脚本。
-- 无 alive 隧道返回 `no_tunnel`，不会静默直连。
-- `script` 只接受 impacket 脚本名（`GetNPUsers.py` / `secretsdump.py` / `findDelegation.py` 等），拒绝路径穿越；`args` 原样传给脚本。
-- 支持 `dry_run` 查看 script/python/proxychains/参数，不执行。
-
----
-
-## DB、隐写与 Windows 注入（0.3.26）
-
-### `db_dump`
-
-- 支持 **MySQL / PostgreSQL**；`action=list` 只列表，`action=dump` 读取指定表前 N 行。
-- `dump` 必须 `confirm=true`；`tables` 可限定（最多 20），`limit_rows` 默认 10、上限 100；`timeout` 上限 900。
-- 只做 SELECT；所有库名/表名走 `quoteDBIdent` 转义；`db.SetMaxOpenConns(1)`；总输出 512KB、单元格 2KB 截断。
-- 返回 `rows/data` 给模型；finding evidence 只写表名/行数，不写数据。
-- 连接失败区分认证失败/不可达/库不存在；明确 `next_steps`。
-- 依赖 `go-sql-driver/mysql` 与 `lib/pq`（纯 Go，不依赖 CGO）。
-
-### `png_stego`
-
-- `action=hide|extract`；PNG RGB LSB，格式 `ARTX` + uint32 长度 + payload，Alpha 保留。
-- payload 上限 4MB；容量不足直接拒绝；`image_path` 不存在时生成 1000x1000 底板。
-- 返回 `bytes_hidden/bytes_extracted + SHA-256`；`extract` 默认不回传 payload，`return_payload=true` 且 ≤1MB 才回传 Base64。
-
-### `win_inject`
-
-- **仅 Windows**；非 Windows 返回 `tool_unsupported`。
-- `process_name` 必须与实际进程路径 basename 完全匹配；PID ≤4 拒绝；`method` 只支持 `createremote`。
-- 实际注入必须 `confirm=true`；`dry_run` 只校验 PID/进程名/shellcode，不分配内存、不注入。
-- shellcode 只接受 Base64/hex，≤1MB；不生成 shellcode、不做 APC/持久化；结果不回传 shellcode。
-- 集成测试默认跳过；设 `ARTEX_WIN_INJECT_LIVE=1` 时会构建一个只 sleep 的 helper，向该 helper 注入 3 字节 `xor eax,eax; ret`，验证 `CreateRemoteThread` 成功，不碰系统/EDR 进程。
-- 这是高影响动作，必须在书面 RoE 与目标进程白名单内使用；不要作为默认自动步骤。
-
----
-
 ## AI 改 AI：自研闭环（skill_draft / skill_test / skill_promote）
 
 旧版的 `genome_*` 表 + `evolve_*` 工具（0.3.27 的「基因组与成本进化」）已整体下线：它只能改文本、晋升还要等成本样本，实战价值低。现在的自研闭环走**造工具**这条路：
@@ -534,7 +393,7 @@ worker 的系统提示里有代码固定的【渗透自进化核心协议】，�
 
 ---
 
-## 前端源码审计（0.3.28）
+## 前端源码审计（0.3.24）
 
 `web_audit` 抓取页面与外部 JS/CSS，做静态提取，不执行 JS：
 
