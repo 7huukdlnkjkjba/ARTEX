@@ -73,6 +73,9 @@ func withToolNameSanitizer(inner llm.Provider) llm.Provider {
 }
 
 func (p *sanitizingProvider) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	// 把本次调用的请求挂到 ctx：外发前的 messages 由 agent/llm.go 的
+	// rewriteRequestBody 重建，RoundTripper 只拿得到 ctx 与字节。
+	ctx = withWireRequest(ctx, req)
 	return func(yield func(llm.StreamEvent, error) bool) {
 		for ev, err := range p.inner.Stream(ctx, req) {
 			if ev.Type == llm.SEToolUseStart {
@@ -89,6 +92,7 @@ func (p *sanitizingProvider) Stream(ctx context.Context, req llm.CompletionReque
 }
 
 func (p *sanitizingProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	ctx = withWireRequest(ctx, req)
 	msg, stop, usage, err := p.inner.Complete(ctx, req)
 	if err != nil {
 		return msg, stop, usage, err

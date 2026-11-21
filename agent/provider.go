@@ -486,7 +486,20 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	// them: norma builds the request body internally and decodes the SSE response
 	// before either reaches the recorder.
 	capt := llmrec.CaptureFrom(req.Context())
-	capt.SetRequest(requestBodySnapshot(req))
+	// 外发 messages 由 agent/llm.go 统一重建：只换 messages 字段，model / tools /
+	// stream_options / system 等其余字节保留 norma 的原样输出。拿不到本次请求
+	// （非本包发起的调用）就按原样发送，这条链路不挡真实调用。
+	snapshot := requestBodySnapshot(req)
+	if wireReq, ok := wireRequestFrom(req.Context()); ok && snapshot != "" {
+		if rebuilt, replaced, rerr := rewriteRequestBody(wireKindForURL(req.URL.Path), []byte(snapshot), wireReq); rerr != nil {
+			log.Printf("[llm] WARN messages 重建失败，按 norma 原样发送: %v", rerr)
+		} else if replaced {
+			applyRequestBody(req, rebuilt)
+			snapshot = string(rebuilt)
+		}
+	}
+	// 抓包必须在重建之后取，记录的才是真正发出去的字节。
+	capt.SetRequest(snapshot)
 
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
