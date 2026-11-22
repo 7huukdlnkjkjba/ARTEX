@@ -32,7 +32,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 - AD 与端口扫描工具（`ad_kerberoast` / `scan_rustscan`）：见下文「AD 与端口扫描工具（0.3.21）」
 - HTTP 黑盒侦察与差分（`recon_http` / `http_diff`）：见下文「HTTP 黑盒侦察与差分（0.3.22）」
 - AI 改 AI：自研闭环（`skill_draft` / `skill_test` / `skill_promote`）：见下文「AI 改 AI：自研闭环（skill_draft / skill_test / skill_promote）」
-- 前端源码审计（`web_audit`）：见下文「前端源码审计（0.3.28）」
+- 前端源码审计（`web_audit`）：见下文「前端源码审计（0.3.24）」
 - 成本控制（¥6 会话预算 / DeepSeek 价格表 / 缓存命中计价）：见下文「成本控制（DeepSeek 省钱）」与「省钱小妙招」
 - 完整变更：[CHANGELOG.md](CHANGELOG.md)
 
@@ -359,7 +359,7 @@ worker 的代码固定工具纪律已要求：单请求 HTTP 侦察优先 `recon
 
 ## AI 改 AI：自研闭环（skill_draft / skill_test / skill_promote）
 
-旧版的 `genome_*` 表 + `evolve_*` 工具（0.3.27 的「基因组与成本进化」）已整体下线：它只能改文本、晋升还要等成本样本，实战价值低。现在的自研闭环走**造工具**这条路：
+旧版的 `genome_*` 表 + `evolve_*` 工具（0.3.23 的「基因组与成本进化」）已整体下线：它只能改文本、晋升还要等成本样本，实战价值低。现在的自研闭环走**造工具**这条路：
 
 ```
 Worker 打不动目标（WAF 拦截 / 无现成 POC / 端口被过滤 / 提权失败）

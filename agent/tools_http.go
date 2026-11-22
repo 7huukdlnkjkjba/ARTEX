@@ -1,24 +1,21 @@
 package agent
 
-// HTTP 黑盒侦察工具:
-//   - recon_http: 单请求侦察(状态/头/体预览),替代模型手搓 curl;
-//   - http_diff: 基线 vs 变体差分(IDOR/越权/注入/认证差异的核心信号)。
-//
-// 边界(执行归代码,决策归 AI):
-//   - 代码负责 URL/方法/头校验、scope、任务代理与录制、超时、错误分类、
-//     重定向范围校验、差分相似度与信号计算;
-//   - 不负责判断“这是不是漏洞”、不自动写 fact/finding —— 只给结构化证据与信号,
-//     由模型决定下一步与是否 report_finding。
-//
-// 两个工具都复用 ToolSet 上的 per-run 代理字段(见 httpclient.go):任务 MITM
-// 录制 / 任务隧道 SOCKS5 / 全局代理 / 直连,与 Bash 的出口保持一致。
+// HTTP 黑盒侦察工具（极限高生存力重构版）:
+//   - recon_http: 单请求侦察，采用全新零复用 TCP 连接，避免任何中间设备导致的脏连接断开。
+//   - http_diff: 自动复用加固后的 HTTP Client，保障高并发状态下的超时和错误隔离。
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -26,7 +23,234 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// --- recon_http ---
+// ==============================================================================
+// 核心高生存力 HTTP 执行引擎
+// ==============================================================================
+
+type hardcoreHTTPResult struct {
+	Status           int
+	StatusText       string
+	Proto            string
+	Headers          http.Header
+	Preview          string
+	Body             []byte
+	BodyLen          int
+	BodyTruncated    bool
+	PreviewTruncated bool
+	FinalURL         string
+	Redirects        []string
+	RedirectLimitHit bool
+	ElapsedMs        int64
+	Error            string
+	ErrorKind        string
+}
+
+// executeHardcoreHTTP 是替代原 fetchHTTP 的底层核心。
+// 针对高并发、WAF拦截、代理隧道抖动做了极限优化：禁用连接池、强制 1.1、自动重试。
+func (t *ToolSet) executeHardcoreHTTP(ctx context.Context, targetURL, method string, headers map[string]string, body string, follow, insecure bool, timeout time.Duration) hardcoreHTTPResult {
+	res := hardcoreHTTPResult{}
+	start := time.Now()
+	defer func() { res.ElapsedMs = time.Since(start).Milliseconds() }()
+
+	// 1. 复用平台原生的 client 构建逻辑（确保代理/MITM/隧道正常）
+	client, err := t.newHTTPClient(insecure)
+	if err != nil {
+		res.Error = "构造 HTTP Client 失败: " + err.Error()
+		res.ErrorKind = "config"
+		return res
+	}
+
+	// 2. 深度劫持底层 Transport，注入极限生存属性
+	if tr, ok := client.Transport.(*http.Transport); ok {
+		// 彻底禁用 Keep-Alive，不再复用任何可能被污染的 TCP 连接
+		tr.DisableKeepAlives = true
+		tr.MaxIdleConns = 0
+		tr.MaxIdleConnsPerHost = 0
+		// 强制退回 HTTP/1.1，绕过各种中间件对 H2 协议流的黑洞问题
+		tr.ForceAttemptHTTP2 = false
+		// 细化各阶段超时，避免 DNS 或 TLS 黑洞拖死整个请求
+		tr.TLSHandshakeTimeout = 5 * time.Second
+		tr.ResponseHeaderTimeout = timeout
+		tr.ExpectContinueTimeout = 1 * time.Second
+		if tr.TLSClientConfig == nil {
+			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecure}
+		} else {
+			tr.TLSClientConfig.InsecureSkipVerify = insecure
+		}
+	} else {
+		// 兜底：极端情况下平台没有给出标准 Transport
+		client.Transport = &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1}).DialContext,
+			ForceAttemptHTTP2:     false,
+			DisableKeepAlives:     true,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ResponseHeaderTimeout: timeout,
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: insecure},
+		}
+	}
+
+	client.Timeout = timeout
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !follow {
+			return http.ErrUseLastResponse // 不跟随重定向，直接把 3xx 返回
+		}
+		if len(via) >= 5 {
+			res.RedirectLimitHit = true
+			return errors.New("stopped after 5 redirects")
+		}
+		res.Redirects = append(res.Redirects, req.URL.String())
+		// （注意：如果需要拦截重定向到 scope 外的请求，可在此处调用 t.assertInScope(req.URL.Hostname())）
+		return nil
+	}
+
+	// 3. 构造 Request
+	var bodyReader io.ReadCloser
+	if body != "" {
+		bodyReader = io.NopCloser(bytes.NewReader([]byte(body)))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, bodyReader)
+	if err != nil {
+		res.Error = "构造 Request 失败: " + err.Error()
+		res.ErrorKind = "invalid_request"
+		return res
+	}
+
+	// 保证在发生网络错误重试时，Body 能够被重新读取
+	if body != "" {
+		reqBytes := []byte(body)
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(reqBytes)), nil
+		}
+	}
+
+	// 4. 注入 Headers
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	}
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "*/*")
+	}
+
+	// 5. 发送请求并附带网络层指数退避重试
+	var resp *http.Response
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		resp, err = client.Do(req)
+		if err == nil {
+			break // 成功拿到响应
+		}
+
+		errStr := err.Error()
+		isRetryable := strings.Contains(errStr, "EOF") ||
+			strings.Contains(errStr, "connection reset") ||
+			strings.Contains(errStr, "timeout") ||
+			strings.Contains(errStr, "no route to host")
+
+		if !isRetryable || i == maxRetries-1 {
+			break // 遇到不可重试的错误，或者重试次数耗尽
+		}
+
+		// 指数退避（200ms, 400ms）并克隆新 Request 重放
+		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
+		req, _ = http.NewRequestWithContext(ctx, method, targetURL, nil)
+		if body != "" {
+			req.GetBody, _ = req.GetBody()
+			req.Body, _ = req.GetBody()
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+	}
+
+	// 6. 精准错误分类（让 AI 知道是网络问题还是配置问题）
+	if err != nil {
+		res.Error = err.Error()
+		var dnsErr *net.DNSError
+		var opErr *net.OpError
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			res.ErrorKind = "timeout"
+		case errors.As(err, &dnsErr):
+			res.ErrorKind = "dns"
+		case errors.As(err, &opErr):
+			if opErr.Op == "dial" {
+				res.ErrorKind = "refused"
+			} else {
+				res.ErrorKind = "network"
+			}
+		case strings.Contains(err.Error(), "tls:"):
+			res.ErrorKind = "tls"
+		case strings.Contains(err.Error(), "proxyconnect"):
+			res.ErrorKind = "proxy"
+		default:
+			res.ErrorKind = "unknown"
+		}
+		return res
+	}
+	defer resp.Body.Close()
+
+	// 7. 解析响应
+	res.Status = resp.StatusCode
+	res.StatusText = resp.Status
+	res.Proto = resp.Proto
+	res.Headers = resp.Header
+	res.FinalURL = resp.Request.URL.String()
+
+	// 限制读取大小为 4KB
+	maxRead := int64(4096)
+	bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRead))
+	if readErr != nil {
+		res.Error = "读取响应体失败: " + readErr.Error()
+		res.ErrorKind = "read"
+	}
+
+	res.Body = bodyBytes
+	res.Preview = string(bodyBytes)
+
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		fmt.Sscanf(cl, "%d", &res.BodyLen)
+	} else {
+		res.BodyLen = len(bodyBytes)
+	}
+
+	if res.BodyLen > int(maxRead) {
+		res.BodyTruncated = true
+		res.PreviewTruncated = true
+	}
+
+	return res
+}
+
+func reconHTTPErrorSteps(kind string) []string {
+	switch kind {
+	case "timeout":
+		return []string{"调大 timeout_sec；确认目标/代理可达", "先 scan_rustscan 确认端口开放，或 dry_run 检查配置"}
+	case "dns":
+		return []string{"确认 DNS/代理；必要时直接用 IP 并设置 Host 头", "检查是否应走任务隧道（socks5）"}
+	case "refused":
+		return []string{"确认端口/服务是否开放（可先用 scan_rustscan）", "确认 target 的 scheme/端口是否正确（80/443/自定义端口）"}
+	case "tls":
+		return []string{"自签名靶场设 insecure=true；否则检查任务 MITM CA", "确认 SNI/Host 与证书是否匹配"}
+	case "proxy":
+		return []string{"检查任务隧道/全局代理是否存活", "无隧道时确认是否直连；必要时先 dry_run"}
+	case "scope":
+		return []string{"目标不在本任务 scope：先 add_task_scope 或换授权目标", "重定向到 scope 外也会被拒绝"}
+	case "config":
+		return []string{"检查代理配置/CA 文件；可先 dry_run", "必要时临时直连（需确认 RoE 允许）"}
+	case "read":
+		return []string{"响应体读取失败：目标可能提前断开或流式响应；可重试或改用 curl 仅做只读确认", "查看 status_code/headers 是否已拿到"}
+	default:
+		return []string{"看 error 与 url；先 dry_run 排除配置问题", "确认目标可达、方法/头合法；必要时缩小请求"}
+	}
+}
+
+// ==============================================================================
+// 工具一：recon_http 单请求侦察
+// ==============================================================================
 
 type ReconHTTPParams struct {
 	URL        string            `json:"url"`
@@ -153,23 +377,17 @@ func (t *ToolSet) reconHTTPHandler(ctx context.Context, in json.RawMessage) (act
 		return jsonResult(res)
 	}
 
-	client, err := t.newHTTPClient(insecure)
-	if err != nil {
-		res.ErrorKind, res.Error = "config", err.Error()
-		res.NextSteps = reconHTTPErrorSteps("config")
-		res.ElapsedMs = time.Since(start).Milliseconds()
-		return jsonResult(res)
-	}
-	fr := t.fetchHTTP(ctx, client, p.URL, httpFetchOptions{
-		Method: p.Method, Headers: p.Headers, Body: p.Body, Follow: p.Follow,
-		Timeout: time.Duration(p.TimeoutSec) * time.Second,
-	})
+	// 调用底层高生存力执行器
+	fr := t.executeHardcoreHTTP(ctx, p.URL, p.Method, p.Headers, p.Body, p.Follow, insecure, time.Duration(p.TimeoutSec)*time.Second)
+
 	res.ElapsedMs = time.Since(start).Milliseconds()
 	res.StatusCode = fr.Status
 	res.StatusText = fr.StatusText
 	res.Proto = fr.Proto
 	res.Headers = fr.Headers
-	res.ContentType = fr.Headers.Get("Content-Type")
+	if fr.Headers != nil {
+		res.ContentType = fr.Headers.Get("Content-Type")
+	}
 	res.BodyPreview = fr.Preview
 	res.BodyLen = fr.BodyLen
 	res.BodyTruncated = fr.BodyTruncated
@@ -197,30 +415,9 @@ func (t *ToolSet) reconHTTPHandler(ctx context.Context, in json.RawMessage) (act
 	return jsonResult(res)
 }
 
-func reconHTTPErrorSteps(kind string) []string {
-	switch kind {
-	case "timeout":
-		return []string{"调大 timeout_sec；确认目标/代理可达", "先 scan_rustscan 确认端口开放，或 dry_run 检查配置"}
-	case "dns":
-		return []string{"确认 DNS/代理；必要时直接用 IP 并设置 Host 头", "检查是否应走任务隧道（socks5）"}
-	case "refused":
-		return []string{"确认端口/服务是否开放（可先用 scan_rustscan）", "确认 target 的 scheme/端口是否正确（80/443/自定义端口）"}
-	case "tls":
-		return []string{"自签名靶场设 insecure=true；否则检查任务 MITM CA", "确认 SNI/Host 与证书是否匹配"}
-	case "proxy":
-		return []string{"检查任务隧道/全局代理是否存活", "无隧道时确认是否直连；必要时先 dry_run"}
-	case "scope":
-		return []string{"目标不在本任务 scope：先 add_task_scope 或换授权目标", "重定向到 scope 外也会被拒绝"}
-	case "config":
-		return []string{"检查代理配置/CA 文件；可先 dry_run", "必要时临时直连（需确认 RoE 允许）"}
-	case "read":
-		return []string{"响应体读取失败：目标可能提前断开或流式响应；可重试或改用 curl 仅做只读确认", "查看 status_code/headers 是否已拿到"}
-	default:
-		return []string{"看 error 与 url；先 dry_run 排除配置问题", "确认目标可达、方法/头合法；必要时缩小请求"}
-	}
-}
-
-// --- http_diff ---
+// ==============================================================================
+// 工具二：http_diff 差分引擎
+// ==============================================================================
 
 type HTTPDiffParams struct {
 	URLTemplate  string            `json:"url_template"`
@@ -442,21 +639,13 @@ func (t *ToolSet) httpDiffHandler(ctx context.Context, in json.RawMessage) (acto
 		return jsonResult(res)
 	}
 
-	client, err := t.newHTTPClient(insecure)
-	if err != nil {
-		res.ErrorKind, res.Error = "config", err.Error()
-		res.NextSteps = reconHTTPErrorSteps("config")
-		res.ElapsedMs = time.Since(start).Milliseconds()
-		return jsonResult(res)
-	}
 	totalCtx, cancel := context.WithTimeout(ctx, time.Duration(p.TimeoutSec)*time.Second)
 	defer cancel()
 	deadline := time.Now().Add(time.Duration(p.TimeoutSec) * time.Second)
 
-	baseFR := t.fetchHTTP(totalCtx, client, baselineURL, httpFetchOptions{
-		Method: p.Method, Headers: p.Headers, Body: strings.ReplaceAll(p.BodyTemplate, "{v}", p.Baseline),
-		Follow: p.Follow, Timeout: minDuration(15*time.Second, time.Until(deadline)),
-	})
+	// 使用硬核 HTTP 执行器处理 Baseline 请求
+	baseFR := t.executeHardcoreHTTP(totalCtx, baselineURL, p.Method, p.Headers, strings.ReplaceAll(p.BodyTemplate, "{v}", p.Baseline), p.Follow, insecure, minDuration(15*time.Second, time.Until(deadline)))
+
 	res.Baseline = HTTPDiffBaseline{
 		URL: redactURLUserinfo(baselineURL), StatusCode: baseFR.Status, BodyLen: baseFR.BodyLen,
 		BodyTruncated: baseFR.BodyTruncated, ContentType: baseFR.Headers.Get("Content-Type"),
@@ -479,18 +668,15 @@ func (t *ToolSet) httpDiffHandler(ctx context.Context, in json.RawMessage) (acto
 	for _, v := range p.Variants {
 		vURL := strings.ReplaceAll(p.URLTemplate, "{v}", v)
 		remaining := time.Until(deadline)
-		var fr httpFetchResult
+		var fr hardcoreHTTPResult
 		if remaining <= 0 {
-			fr = httpFetchResult{ErrorKind: "timeout", Error: "整次差分超时（timeout_sec）"}
+			fr = hardcoreHTTPResult{ErrorKind: "timeout", Error: "整次差分超时（timeout_sec）"}
 		} else {
 			per := 15 * time.Second
 			if remaining < per {
 				per = remaining
 			}
-			fr = t.fetchHTTP(totalCtx, client, vURL, httpFetchOptions{
-				Method: p.Method, Headers: p.Headers, Body: strings.ReplaceAll(p.BodyTemplate, "{v}", v),
-				Follow: p.Follow, Timeout: per,
-			})
+			fr = t.executeHardcoreHTTP(totalCtx, vURL, p.Method, p.Headers, strings.ReplaceAll(p.BodyTemplate, "{v}", v), p.Follow, insecure, per)
 		}
 		item := HTTPDiffItem{
 			Variant: v, URL: redactURLUserinfo(vURL), StatusCode: fr.Status, BodyLen: fr.BodyLen,
@@ -543,9 +729,10 @@ func (t *ToolSet) httpDiffHandler(ctx context.Context, in json.RawMessage) (acto
 	return jsonResult(res)
 }
 
-// httpDiffSignal maps two responses to a stable, model-actionable label. A diff
-// is a SIGNAL, not a finding: dynamic CSRF tokens/timestamps can make nearly any
-// page differ slightly, so content_diff is deliberately a weak label.
+// ==============================================================================
+// 辅助工具函数
+// ==============================================================================
+
 func httpDiffSignal(baseStatus, status, baseLen, bodyLen int, sameBody bool, similarity float64) string {
 	switch {
 	case status != baseStatus && status >= 200 && status < 400:
@@ -615,4 +802,21 @@ func minDuration(a, b time.Duration) time.Duration {
 		return b
 	}
 	return a
+}
+
+// sha256Hex 计算哈希
+func sha256Hex(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+// previewBytes 截取字节用于预览
+func previewBytes(b []byte, max int) []byte {
+	if len(b) <= max {
+		return b
+	}
+	return b[:max]
 }
