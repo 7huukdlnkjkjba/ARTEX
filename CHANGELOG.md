@@ -22,9 +22,32 @@
   + 本次真实工具列表生成，最多 5 条，紧贴意图块）、**Windows shell 真实语义写进 Bash 描述**、
   **provider 层清洗被模板标记污染的工具名**、**启动时自动把仍是内置默认的提示词升级到代码
   最新版**（用户改过的一律不碰，只打印一条提示）。闸门可用 `ARTEX_TOOLCHAIN_GATE=off` 关闭。
+- **`detectPython` 选中 Windows 应用商店的 python3 占位符**：`LookPath` 能找到，实际执行
+  返回 9009，导致自研工具（`skill_promote` 的 script 工具）与 `TestExecPython` 全部失败。
+  现在候选解释器要真跑一次 `-c "import sys"` 才被采用，坏的跳过、回退到可用的 `python`。
 
 ### 新增的功能
 
+- **漏洞挖掘自研闭环 `vuln_miner`（0.3.26 形态，复用 0.3.23 的 skill_* 通道）**：
+  意图 `blocked/exhausted` 且失败文本或本任务近期 finding 命中 WAF/源码泄露/逻辑报错时，
+  引擎派一条 `action=vuln_miner` 意图（每任务 1 条，不与 `self_evolve` 互相递归）：
+  先用 `web_audit` 抓前端资源、`audit_source` 做 Source→Sink（去注释/字符串后匹配 sink，
+  输出 `flows[]` 行号与 `concatenated` 标记）、`ghidra_decompile` 出伪代码（内置 Ghidra
+  无头分析，开源替代 IDA；没有 Ghidra 返回 `tool_missing`、没有 JDK 21+ 返回 `java_missing`，
+  不返回占位伪代码）；再 `skill_draft` 写带基线对照的绕过 EXP，
+  `skill_test` 真跑，`skill_promote` 固化为 `sk_waf_bypass_<target>` 等工具。
+  晋升结果回写 fact/hint（含工具 key、调用示例、适用目标），下一个 worker 由
+  `AugmentTools` 重建工具集后可直接调用，无需重启；本轮无产出也会写 fact 收口。
+  `ARTEX_VULN_MINER=off` 可单独关闭。新增 `audit_source` / `ghidra_decompile` 仅注入
+  vuln_miner 专用 worker，不进 `tools` 表。
+  **二进制取证改用开源 Ghidra**：`ghidra_decompile` 调本机/内置 `support/analyzeHeadless`
+  出伪代码（独立临时 project、`-analysisTimeoutPerFile` 限制分析阶段、跑完 `-deleteProject`），
+  按 `ARTEX_GHIDRA_HOME` → `<ARTEX目录>/ghidra` → `<cwd>/ghidra` → PATH 查找，JDK 按
+  `ARTEX_GHIDRA_JAVA_HOME` → `JAVA_HOME` → 常见安装目录探测（只认真实 `java -version` ≥ 21）；
+  彻底移除对闭源 IDA 的依赖。
+  **晋升后的 Python 工具不丢参数**：自定义 script 工具只给 stdin/`TOOL_ARGS`、没有 argv，
+  因此晋升时在脚本入口插入 argv 还原垫片（`promotedPythonSource`），让下一个 worker
+  直接 `sk_xxx(args="--target ...")` 调用即可生效；`skill_test` 阶段的直跑不受影响。
 - **内网原生协议 `raw_tcp`**：SMB2 NEGOTIATE / LDAP 匿名 Bind / TDS PRELOGIN / MySQL 握手 /
   任意 hex 的 TCP 探测；优先走任务隧道 SOCKS5（`TaskSocks5ForTask`），其次全局 SOCKS5，
   最后直连；结果带 `egress`、`request_hex`/`response_hex`、SMB2/LDAP/TDS/MySQL 指纹。

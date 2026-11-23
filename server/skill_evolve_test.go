@@ -172,3 +172,42 @@ func TestSkillPromoteWithoutDB(t *testing.T) {
 		t.Fatalf("无 DB 应报错: %+v", res)
 	}
 }
+
+// promotedPythonSource 必须幂等，且 shebang 仍在第一行（否则直接执行会坏）。
+func TestPromotedPythonSource(t *testing.T) {
+	plain := "print('hi')\n"
+	once := promotedPythonSource(plain)
+	if !strings.Contains(once, "ARTEX_PROMOTED_ARGV") || !strings.Contains(once, plain) {
+		t.Fatalf("垫片未插入: %s", once)
+	}
+	if twice := promotedPythonSource(once); twice != once {
+		t.Fatal("重复晋升不应重复插入垫片")
+	}
+
+	shebang := "#!/usr/bin/env python3\nprint('hi')\n"
+	got := promotedPythonSource(shebang)
+	if !strings.HasPrefix(got, "#!/usr/bin/env python3\n") {
+		t.Fatalf("shebang 被破坏: %q", got[:40])
+	}
+	if !strings.Contains(got, "ARTEX_PROMOTED_ARGV") {
+		t.Fatal("shebang 场景未插入垫片")
+	}
+}
+
+// 晋升后的 Python 工具必须真的拿到 argv：自定义 script 工具只给 stdin/TOOL_ARGS，
+// 垫片负责还原。这里直接跑 execPython，验证 args → argv 的整条链路。
+func TestPromotedPythonToolGetsArgv(t *testing.T) {
+	interp := detectPython()
+	if interp == "" {
+		t.Skip("本机没有可用 python，跳过")
+	}
+	code := promotedPythonSource("import sys\nprint('|'.join(sys.argv[1:]))\n")
+	out, err := execPython(context.Background(), interp, "sk_argv_probe", code,
+		map[string]any{"args": `--target http://x --param "a b"`}, t.TempDir(), nil, 20000000000)
+	if err != nil {
+		t.Fatalf("execPython: %v", err)
+	}
+	if !strings.Contains(out, "--target|http://x|--param|a b") {
+		t.Fatalf("晋升工具没有拿到 argv: %q", out)
+	}
+}

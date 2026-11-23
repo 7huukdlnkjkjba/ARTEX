@@ -1020,7 +1020,12 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 	}
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
-	e.maybeQueueSelfEvolve(t, intent, state, err)
+	// 自研通道：源码级/WAF 信号优先升格为 vuln_miner（先取证再造工具），否则走
+	// v0.3.23 的通用自研（skill_draft → skill_test → skill_promote）。两者互斥，
+	// 同一次失败只派一条。
+	if !e.maybeQueueVulnMiner(t, intent, state, err) {
+		e.maybeQueueSelfEvolve(t, intent, state, err)
+	}
 	e.touch(t.ID)
 	t.NotifyDone(intent.ID)
 	return true
@@ -1043,8 +1048,8 @@ func (e *Engine) maybeQueueSelfEvolve(t *Task, intent *db.Node, state string, ru
 	if state != "blocked" && state != "exhausted" {
 		return
 	}
-	if agent.IntentIsSelfEvolve(intent) {
-		return // 自研意图自己失败也要收口，不再递归派发
+	if agent.IntentIsSelfEvolve(intent) || agent.IntentIsVulnMiner(intent) {
+		return // 自研/挖掘意图自己失败也要收口，不再递归派发
 	}
 	fails, err := t.Store.CountUnsuccessfulIntents()
 	if err != nil || fails < selfEvolveFailThreshold {
@@ -1124,7 +1129,7 @@ func specialIntentAction(intent *db.Node) string {
 		return ""
 	}
 	switch p.Action {
-	case "exploit_author", "vulnhunt":
+	case "exploit_author", "vulnhunt", "vuln_miner":
 		return p.Action
 	}
 	return ""

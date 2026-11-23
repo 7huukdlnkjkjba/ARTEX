@@ -249,6 +249,19 @@ WHERE exploration_id=$1 AND kind='intent' AND payload->>'self_evolve' = 'true'`,
 	return n, err
 }
 
+// CountIntentsByAction 统计本探索里某个 action 的意图数（如 vuln_miner）。
+// 与 CountSelfEvolveIntents 分开，避免两条自研通道共用配额、互相饿死。
+func (s *ExplorationStore) CountIntentsByAction(action string) (int, error) {
+	if action == "" {
+		return 0, nil
+	}
+	var n int
+	err := s.db.QueryRow(`
+SELECT COUNT(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND payload->>'action'=$2`, s.expID, action).Scan(&n)
+	return n, err
+}
+
 // OriginFactID returns this exploration's root fact id — the KindFact node with
 // state='origin' seeded at task creation (the task root). Every intent traces
 // back to it. Returns 0 (no error) when none exists (legacy explorations created

@@ -67,3 +67,6 @@ Thumbs.db
 /.gotmp/
 /*.exe
 /*.exe.bak-*
+
+# 内置 Ghidra（本地解压/软链接，体积大且不随仓库分发）
+/ghidra/

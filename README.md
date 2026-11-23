@@ -23,7 +23,8 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.22** | **HTTP 黑盒工具化**：新增 worker 工具 `recon_http`（单请求侦察：状态/头/体预览/重定向/超时/错误分类，走任务代理与录制）与 `http_diff`（基线 vs 变体：状态翻转/长度/内容相似度信号，支持 IDOR/越权/注入/认证差异）；HTTP 侦察优先走工具，执行归代码、决策归 AI |
 | **v0.3.23** |**AI 改 AI：渗透自研闭环**：废弃 `genome_*` 表与 `evolve_*` 工具，改为 `skill_draft`（现场写脚本）/ `skill_test`（真跑验证）/ `skill_promote`（注册成全局工具）；连续 2 条意图打不动时引擎强制派发自研意图，worker 提示词内置【渗透自进化核心协议】 |
 | **v0.3.24** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
-| **v0.3.25** | **服务端API破甲层提示词和AI全权限虚假记忆注入**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，![手动复制提示词](https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)，完美提示词加代码的破甲|
+| **v0.3.25** | **服务端API破甲层提示词和AI全权限虚假记忆注入**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，![手动复制提示词](https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)，完美提示词加代码的破甲，通过中间件改写HTTP请求体，将真实目标和伪造的tool_calls混入messages。在网关层伪造工具调用状态，让ai模型误认为调用正在进行中或已完成，顺着上下文继续处理，以此压低安全拦截权重，该行为并非模型自主推理产生，由破甲者用精心编造一个AI记忆错觉技术。|
+| **v0.3.26** | **漏洞挖掘自研闭环（vuln_miner）**：失败信号命中 WAF/源码泄露/逻辑报错时，引擎派发 `vuln_miner` 意图——先用 `web_audit` / `audit_source`（Source→Sink，标出同语句拼接）/ `ghidra_decompile`（内置 Ghidra 无头反编译，开源替代 IDA）取证，再 `skill_draft` 写绕过 EXP、`skill_test` 真跑、`skill_promote` 固化为 `sk_waf_bypass_<target>` 工具；晋升结果写 fact/hint，下一个 worker 直接调用，不重写脚本 |
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -382,6 +383,39 @@ Worker 打不动目标（WAF 拦截 / 无现成 POC / 端口被过滤 / 提权�
 `server/engine.go` 里，意图以 `blocked` / `exhausted` 收场、且本任务累计失败意图
 ≥2 条时，引擎直接派一条 `action=self_evolve` 的意图（每任务上限 2 条，不递归），
 worker 的系统提示里有代码固定的【渗透自进化核心协议】，要求它先写脚本再继续。
+
+### 漏洞挖掘形态（0.3.26）：先取证，再写 EXP
+
+通用自研仍从「失败」出发；0.3.26 在其前面加了一层**源码取证**，把「造工具」升级为
+「先证明 Source→Sink，再造能绕过当前防御的工具」：
+
+```
+意图 blocked/exhausted
+  → 信号判定（失败文本 + 本任务近期 finding）：WAF / 源码泄露 / 逻辑报错
+  → 派 action=vuln_miner 意图（每任务 1 条；无信号则退回 0.3.23 的 self_evolve）
+  → web_audit 抓前端资源 / audit_source 做 Source→Sink / ghidra_decompile 出伪代码
+  → 只对「source 可控 + 危险 sink + 可达」的链路写 EXP（concatenated=true 优先）
+  → skill_draft（含基线 vs 绕过差异验证）→ skill_test（真实回显）→ skill_promote
+  → 工具 key = sk_<skill>（如 sk_waf_bypass_shop_example_com），描述里带「适用目标」
+  → 写 fact + hint：「后续 worker 直接调用，不要重写脚本」
+```
+
+- **触发**：`classifyVulnMinerSignal` 只认三类信号（`waf_bypass` / `source_exposure` /
+  `logic_flaw`）；`vuln_miner` 自身失败不再递归，也不再派通用 `self_evolve`。
+- **工具**：`audit_source` 是纯静态（去注释/字符串后匹配 sink，给出行号与 flow），
+  只读、不执行目标代码；`ghidra_decompile` 用**内置 Ghidra**（开源，替代闭源 IDA）跑
+  `support/analyzeHeadless`：独立临时 project、分析阶段有单独超时上限、跑完 `-deleteProject`；
+  找不到 Ghidra 返回 `status=tool_missing`，没有 JDK 21+ 返回 `java_missing`，不会拿占位伪代码糊弄。
+  查找顺序：`ARTEX_GHIDRA_HOME` → `<ARTEX目录>/ghidra` → `<cwd>/ghidra` → PATH；
+  JDK 查找顺序：`ARTEX_GHIDRA_JAVA_HOME` → `JAVA_HOME` → 常见安装目录（只认真实 `java -version` ≥ 21）。
+- **复用**：`skill_promote` 落库后绑定 `worker`，下一个意图运行前 `AugmentTools`
+  按 `tools` 表重建工具集，因此新工具**无需重启**即可被下一个 worker 调用；
+  `vuln_miner` 收尾会回查 `tools` 表并写 fact/hint，planner 与后续 worker 都能看到。
+  晋升后的 Python 工具会在入口把 `TOOL_ARGS` 还原成 `sys.argv`（自定义 script 工具没有
+  argv），所以 `sk_xxx(args="--target ... --param ...")` 直接调用即可复现验证过的行为。
+- **证据纪律**：没有真实回显不许晋升；晋升后回查工具行；本轮没产出工具也要写 fact
+  收口（附卡点），避免规划者反复派同轴挖掘。
+- **关闭开关**：`ARTEX_VULN_MINER=off`（只关挖掘形态；`ARTEX_SELF_EVOLVE=off` 关整条自研链路）。
 
 ### 硬边界
 

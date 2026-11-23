@@ -351,6 +351,11 @@ func previewBytes(b []byte, n int) []byte {
 }
 
 func sha256Hex(b []byte) string {
+	// 空 body 返回空串：调用方用 “有没有 body” 判断要不要展示哈希，
+	// 返回空串的 SHA256（e3b0c442…）会让“无 body”看起来像“有 body”。
+	if len(b) == 0 {
+		return ""
+	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }

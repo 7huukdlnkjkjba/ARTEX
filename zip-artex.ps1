@@ -33,6 +33,8 @@ $tar = Join-Path $env:SystemRoot 'system32\tar.exe'
 if (-not (Test-Path -LiteralPath $tar)) { throw "找不到 $tar（需要 Windows 10 1803+ 自带的 bsdtar）" }
 
 $excludes = @("--exclude=$rootName/_zip_build")
+# 内置 Ghidra（~1GB，本地解压/软链接，不入包）
+$excludes += "--exclude=$rootName/ghidra"
 # 如果 zip 输出在源目录内部，必须排除它，否则会把正在写的包打进自己
 if ($Destination.StartsWith($Source + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
     $rel = $Destination.Substring($Source.Length + 1).Replace('\', '/')

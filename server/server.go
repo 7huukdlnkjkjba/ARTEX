@@ -195,6 +195,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			return s.executeExploitAuthor(ctx, t, intent)
 		case "vulnhunt":
 			return s.executeVulnHunter(ctx, t, intent)
+		case "vuln_miner":
+			return s.executeVulnMiner(ctx, t, intent)
 		default:
 			return "", agent.WriteCounts{}, fmt.Errorf("unknown specialist action: %s", action)
 		}

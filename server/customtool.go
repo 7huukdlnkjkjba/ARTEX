@@ -183,9 +183,20 @@ func (s *Server) pgTestCustomTool(w http.ResponseWriter, r *http.Request) {
 const settingPythonInterp = "python_interpreter"
 
 // detectPython finds a python interpreter absolute path (python3 preferred).
+//
+// Windows 上 %LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe 常是“应用商店别名”
+// 占位符：LookPath 找得到，实际执行返回 9009。晋升后的自研工具全部依赖这个解释器，
+// 所以这里必须真跑一次 `-c` 验证，坏的解释器直接跳过再试下一个。
 func detectPython() string {
 	for _, c := range []string{"python3", "python"} {
-		if p, err := exec.LookPath(c); err == nil {
+		p, err := exec.LookPath(c)
+		if err != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		probeErr := exec.CommandContext(ctx, p, "-c", "import sys").Run()
+		cancel()
+		if probeErr == nil {
 			return p
 		}
 	}

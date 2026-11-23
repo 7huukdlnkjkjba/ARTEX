@@ -7,9 +7,7 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +41,24 @@ type hardcoreHTTPResult struct {
 	ElapsedMs        int64
 	Error            string
 	ErrorKind        string
+}
+
+// defaultHTTPUserAgent 是本工具在任务未配置稳定 UA 时的兜底值。
+const defaultHTTPUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+// applyDefaultHeaders 补全 UA/Accept：优先用任务级稳定 UA（worker 的 SetHTTPUserAgent，
+// 与 Bash 出口保持一致），未配置时才落回浏览器 UA。网络重试会重建 Request，必须重新调用。
+func (t *ToolSet) applyDefaultHeaders(req *http.Request) {
+	if req.Header.Get("User-Agent") == "" {
+		ua := strings.TrimSpace(t.httpUA)
+		if ua == "" {
+			ua = defaultHTTPUserAgent
+		}
+		req.Header.Set("User-Agent", ua)
+	}
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "*/*")
+	}
 }
 
 // executeHardcoreHTTP 是替代原 fetchHTTP 的底层核心。
@@ -91,6 +107,12 @@ func (t *ToolSet) executeHardcoreHTTP(ctx context.Context, targetURL, method str
 
 	client.Timeout = timeout
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// 重定向链要记录（含不跟随模式下的第一跳 3xx），供模型判断跳转目标；
+		// 每一跳都必须仍在任务 scope 内。
+		res.Redirects = append(res.Redirects, req.URL.String())
+		if err := t.assertInScope(req.URL.Hostname()); err != nil {
+			return err
+		}
 		if !follow {
 			return http.ErrUseLastResponse // 不跟随重定向，直接把 3xx 返回
 		}
@@ -98,8 +120,6 @@ func (t *ToolSet) executeHardcoreHTTP(ctx context.Context, targetURL, method str
 			res.RedirectLimitHit = true
 			return errors.New("stopped after 5 redirects")
 		}
-		res.Redirects = append(res.Redirects, req.URL.String())
-		// （注意：如果需要拦截重定向到 scope 外的请求，可在此处调用 t.assertInScope(req.URL.Hostname())）
 		return nil
 	}
 
@@ -116,24 +136,11 @@ func (t *ToolSet) executeHardcoreHTTP(ctx context.Context, targetURL, method str
 		return res
 	}
 
-	// 保证在发生网络错误重试时，Body 能够被重新读取
-	if body != "" {
-		reqBytes := []byte(body)
-		req.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(reqBytes)), nil
-		}
-	}
-
 	// 4. 注入 Headers
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	}
-	if req.Header.Get("Accept") == "" {
-		req.Header.Set("Accept", "*/*")
-	}
+	t.applyDefaultHeaders(req)
 
 	// 5. 发送请求并附带网络层指数退避重试
 	var resp *http.Response
@@ -156,14 +163,15 @@ func (t *ToolSet) executeHardcoreHTTP(ctx context.Context, targetURL, method str
 
 		// 指数退避（200ms, 400ms）并克隆新 Request 重放
 		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
-		req, _ = http.NewRequestWithContext(ctx, method, targetURL, nil)
+		var retryBody io.ReadCloser
 		if body != "" {
-			req.GetBody, _ = req.GetBody()
-			req.Body, _ = req.GetBody()
+			retryBody = io.NopCloser(bytes.NewReader([]byte(body)))
 		}
+		req, _ = http.NewRequestWithContext(ctx, method, targetURL, retryBody)
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
+		t.applyDefaultHeaders(req)
 	}
 
 	// 6. 精准错误分类（让 AI 知道是网络问题还是配置问题）
@@ -802,21 +810,4 @@ func minDuration(a, b time.Duration) time.Duration {
 		return b
 	}
 	return a
-}
-
-// sha256Hex 计算哈希
-func sha256Hex(data []byte) string {
-	if len(data) == 0 {
-		return ""
-	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
-}
-
-// previewBytes 截取字节用于预览
-func previewBytes(b []byte, max int) []byte {
-	if len(b) <= max {
-		return b
-	}
-	return b[:max]
 }

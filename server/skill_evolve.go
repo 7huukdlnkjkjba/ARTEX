@@ -417,6 +417,31 @@ func skillToolKey(name string) string {
 	return k
 }
 
+// promotedScriptArgvPreamble 让「按 argv 写」的脚本在被晋升成工具后仍然拿到参数。
+//
+// 自定义 script 工具的执行约定是：参数以 stdin JSON + TOOL_<NAME> 环境变量传入，
+// **没有 argv**（见 execPython）。而 skill_draft/skill_test 阶段脚本是按 argv 跑通的，
+// 直接用晋升后的工具调用时参数会“消失”。这里在入口把 TOOL_ARGS 按 shell 词法还原
+// 成 sys.argv，脚本正文不用改，skill_test 阶段的直跑也不受影响。
+const promotedScriptArgvPreamble = "# ARTEX_PROMOTED_ARGV: 自定义工具调用时参数走 TOOL_ARGS，这里还原成 argv\n" +
+	"import os as __artex_os, shlex as __artex_shlex, sys as __artex_sys\n" +
+	"if __artex_os.environ.get(\"TOOL_ARGS\"):\n" +
+	"    __artex_sys.argv = [__artex_sys.argv[0]] + __artex_shlex.split(__artex_os.environ[\"TOOL_ARGS\"])\n"
+
+// promotedPythonSource 在脚本入口插入 argv 还原垫片（幂等；已含标记则原样返回）。
+// 有 shebang 时插在 shebang 之后，保持文件头语义。
+func promotedPythonSource(code string) string {
+	if strings.Contains(code, "ARTEX_PROMOTED_ARGV") {
+		return code
+	}
+	if strings.HasPrefix(code, "#!") {
+		if i := strings.IndexByte(code, '\n'); i >= 0 {
+			return code[:i+1] + promotedScriptArgvPreamble + code[i+1:]
+		}
+	}
+	return promotedScriptArgvPreamble + code
+}
+
 func (s *Server) toolSkillPromote() actool.CoreTool {
 	return wrTool("skill_promote",
 		"【自研模式·固化】把 skill_test 已验证的脚本注册成全局自定义工具（写 tools 表），本任务所有 worker 立刻可见可调。\n"+
@@ -427,7 +452,7 @@ func (s *Server) toolSkillPromote() actool.CoreTool {
 			"agents":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "绑定的 agent key，默认 [worker]（全任务 worker）"},
 			"lang":        strParam("可选 py|sh；不填则自动找"),
 		}, "name"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			if s.m == nil || s.m.pg == nil {
 				return actool.Errorf("数据库不可用"), nil
 			}
@@ -460,10 +485,13 @@ func (s *Server) toolSkillPromote() actool.CoreTool {
 			if desc == "" {
 				desc = fmt.Sprintf("【自研工具】%s：worker 现场编写并通过 skill_test 验证的脚本", a.Name)
 			}
+			// 调用方（vuln_miner）可以给晋升工具加适用范围/绑定，而不改这里的通用逻辑。
+			policy := promotePolicyFrom(ctx)
+			desc, agents = policy.apply(desc, agents)
 			schema := map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"args": map[string]any{"type": "string", "description": "传给脚本的命令行参数（原样拼接）"},
+					"args": map[string]any{"type": "string", "description": "传给脚本的命令行参数（Python 会按 shell 词法切分成 argv，如 --target http://x --param q；Bash 以单个字符串进入 $1）"},
 				},
 			}
 			schemaRaw, _ := json.Marshal(schema)
@@ -474,7 +502,10 @@ func (s *Server) toolSkillPromote() actool.CoreTool {
 			}
 			switch strings.ToLower(filepath.Ext(path)) {
 			case ".py":
-				execRaw, _ := json.Marshal(map[string]any{"code": string(code), "timeout_ms": skillDefaultTimeout * 1000})
+				execRaw, _ := json.Marshal(map[string]any{
+					"code":       promotedPythonSource(string(code)),
+					"timeout_ms": skillDefaultTimeout * 1000,
+				})
 				t.Exec = execRaw
 			case ".sh":
 				t.Kind = "command"
@@ -500,6 +531,9 @@ func (s *Server) toolSkillPromote() actool.CoreTool {
 				return actool.Errorf("注册工具失败: " + err.Error()), nil
 			}
 			log.Printf("[self-evolve] skill %s 晋升为工具 %s (kind=%s, agents=%v)", a.Name, key, t.Kind, agents)
+			if policy != nil && policy.OnPromoted != nil {
+				policy.OnPromoted(promotedTool{Key: key, Name: a.Name, Description: desc, Kind: t.Kind})
+			}
 			return jsonResult(map[string]any{
 				"tool_key": key, "kind": t.Kind, "agents": agents, "action": action,
 				"path": filepath.ToSlash(path), "next": "该工具已对绑定的 worker 可见；直接调用它继续推进攻击链",

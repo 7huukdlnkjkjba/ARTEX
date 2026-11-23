@@ -12,3 +12,6 @@ var ExploitAuthorDefault string
 
 //go:embed prompts/vulnhunter_prompt.md
 var VulnHunterDefault string
+
+//go:embed prompts/vuln_miner.md
+var VulnMinerDefault string

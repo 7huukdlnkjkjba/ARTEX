@@ -101,6 +101,29 @@ func TestIntentIsSelfEvolve(t *testing.T) {
 	}
 }
 
+// vuln_miner 与 self_evolve 同属自研通道，但必须能被独立识别：它走源码取证 +
+// 专用工具集，不能误吃 self_evolve 的合成记忆种子。
+func TestIntentIsVulnMiner(t *testing.T) {
+	cases := []struct {
+		payload string
+		want    bool
+	}{
+		{`{"action":"vuln_miner"}`, true},
+		{`{"action":"self_evolve","self_evolve":true}`, false},
+		{`{"action":"probe"}`, false},
+		{`{}`, false},
+	}
+	for _, c := range cases {
+		n := &db.Node{Payload: json.RawMessage(c.payload)}
+		if got := IntentIsVulnMiner(n); got != c.want {
+			t.Fatalf("IntentIsVulnMiner(%s) = %v, want %v", c.payload, got, c.want)
+		}
+	}
+	if IntentIsVulnMiner(nil) {
+		t.Fatal("nil intent 不应判为 vuln_miner")
+	}
+}
+
 // 协议文本里必须点名三个工具，否则模型不知道调什么（历史教训：只描述“自研”而不给
 // 工具名，调用数为 0）。
 func TestSelfEvolveRuleNamesTools(t *testing.T) {

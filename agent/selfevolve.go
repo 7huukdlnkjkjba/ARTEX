@@ -27,11 +27,12 @@ import (
 // selfEvolveRule 是代码固定的尾段，追加在 worker 系统提示里（不可被 DB 正文覆盖）。
 const selfEvolveRule = "\n\n【渗透自进化核心协议】\n" +
 	"你的任务是拿下目标权限。当现有工具（scan_rustscan / recon_http / http_diff / sqlmap_run / nuclei_run / msf_* / db_dump 等）打不动目标时——WAF 拦截、没有现成 POC、端口被过滤、提权失败、认证过不去——**不要停在「失败」上，立刻进入自研模式**：\n" +
+	"0. 先判断失败层次：如果卡点是 **WAF/前端 JS 混淆/源码级线索**，平台可能已派 `vuln_miner` 意图（专用工具集含 `web_audit` / `audit_source` / `ghidra_decompile`），那条意图负责「先取证、再写 EXP」；本条意图不要重复造同类脚本，把线索写进 fact 交给它。\n" +
 	"1. 调 `skill_draft(name, description, code, lang)`：现场写一个只针对当前目标/当前防御的脚本（Python 或 Bash），存到 skills/dynamic/。脚本必须自包含、参数从 argv 取、结果打 stdout，只依赖目标环境常见组件（python3/bash/curl）。\n" +
 	"2. 写完立刻调 `skill_test(name, args)` 亲自执行，拿真实 stdout/stderr/exit_code。**不许凭空声称成功**；失败就按错误原文改脚本再测，最多 3 轮。\n" +
-	"3. 脚本一旦打出敏感信息、数据库回显、可用的 shell/会话，立刻调 `skill_promote(name)` 固化进 tools 表（全体 worker 立即可用），然后用 `record_fact` 把可复现的输入/输出写回台账，再继续推进攻击链（提权、横向、取证）。\n" +
+	"3. 脚本一旦打出敏感信息、数据库回显、可用的 shell/会话，立刻调 `skill_promote(name)` 固化进 tools 表（全体 worker 立即可用），然后用 `record_fact` 把可复现的输入/输出写回台账，再继续推进攻击链（提权、横向、取证）。工具名用「适用防御_目标」形式（如 `waf_bypass_<site>`），晋升后 key 是 `sk_<name>`，方便下一个 worker 按名字直接调用。\n" +
 	"4. 同一目标最多自研 2 条脚本；两条都不成说明思路不对，换轴（换入口/换协议/换漏洞类），不要在同一参数上来回微调。\n" +
-	"5. 自研脚本只写 `skills/dynamic/`；禁止改 Go/SQL/guard/scope，禁止把凭据明文写进 report/evidence。"
+	"5. 自研脚本只写 `skills/dynamic/`；禁止改 Go/SQL/guard/scope，禁止把凭据明文写进 report/evidence；没有真实回显就不许 report_finding。"
 
 // SelfEvolveEnabled 报告自研模式是否启用（默认开）。ARTEX_SELF_EVOLVE=off 关闭。
 func SelfEvolveEnabled() bool {
@@ -64,6 +65,22 @@ func IntentIsSelfEvolve(intent *db.Node) bool {
 		return false
 	}
 	return p.SelfEvolve || p.Action == "self_evolve"
+}
+
+// IntentIsVulnMiner 判断意图是否 v0.3.26 的漏洞挖掘意图（先取证再造工具）。
+// 它与 self_evolve 是同一族（都属自研通道），但执行体、配额、记忆种子都独立：
+// vuln_miner 不注入「上一轮已经打通」的合成历史，避免模型把推断当证据。
+func IntentIsVulnMiner(intent *db.Node) bool {
+	if intent == nil || len(intent.Payload) == 0 {
+		return false
+	}
+	var p struct {
+		Action string `json:"action"`
+	}
+	if json.Unmarshal(intent.Payload, &p) != nil {
+		return false
+	}
+	return p.Action == "vuln_miner"
 }
 
 // SelfEvolveSeedMessages 构造「上一轮已经打通」的合成历史：
