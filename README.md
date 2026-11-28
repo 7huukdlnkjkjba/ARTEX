@@ -16,7 +16,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 |---|---|
 | **v0.3.16** | **deepseek-hermes省钱代码（成本控制）**：单次会话默认余额无限制，缓存命中按 ¥0.5/M 单独计价、不与输入重复计费，预算余额写进 planner/worker 提示词逼模型收敛，任务详情显示 `≈¥已用 / 上限` |
 | **v0.3.17** | 并入artex-ymh能力「外网突破 → 立足点 → 内网纵深」：webshell 会话、penelope 反弹、`session_recon`、suo5/chisel 隧道、内网拓扑、凭据库、待授权网段、任务移交、伪装门控、一键放行、RoE 三态、蜜罐识别、chains 技能、`artex doctor` |
-| **v0.3.18** | Metasploit **全自动闭环**（**端到端已验证 2026-10-27**）：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、确认后自动派单、会话自动取证并写回 fact；当时经 MCP 调用（0.3.27 起改为内置 `msfrpc` 直连 RPC，MCP/Python 依赖已删除） |
+| **v0.3.18** | Metasploit **全自动闭环**（**端到端已验证 2026-10-27**）：确定性决策层 `msf/`、`msf_plan`/`msf_next`/`msf_execute`、自动拉起受管 msfrpcd、内置 MCP 启动、确认后自动派单、会话自动取证并写回 fact；MCP 包已内置在二进制里（0.3.27 起不再 `pip install`） |
 | **v0.3.19** | **Exploit Author + Vuln Hunter**：Metasploit 无确定性路径的确认漏洞自动转交 `exploit_author` 意图，用 `exploit_init/write/run/verify/abandon` 写出并验证真实 exp；新增 `vulnhunt` 意图与 `vulnhunt_init/build/fuzz/triage/report` 工具，对本地仓库/二进制做 fuzzing、按 sanitizer 栈去重并提升为 finding|
 | **v0.3.20** | **WAF 绕过预筛**：新增人工接口 `POST /api/waf-probe`，先识别 WAF 指纹，再把同一条 SQL 注入意图用 8 种编码/变形重放，返回 `bypassable`/`hard`/`skip`、0-100 评分与逐条证据（`server/waf_bypass_probe.go`） |
 | **v0.3.21** | **AD 与侦察工具化**：新增 worker 工具 `ad_kerberoast`（Kerberoasting：枚举/定向 TGS、RC4+AES 哈希解析、凭据库/scope/dry-run、finding/fact 回写）与 `scan_rustscan`（RustScan TCP 全端口扫描：结构化开放端口、CIDR 保护、scope、fact 回写）；端口扫描强制走 `scan_rustscan`，执行归代码、决策归 AI |
@@ -25,10 +25,9 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.24** | **前端源码审计**：新增 `web_audit`（HTML 表单/注释、外部 JS/CSS、API 路由、硬编码密钥、DOM XSS sink；默认同 host、跨域 CDN 需显式开启；走任务 MITM，密钥 finding 自动回写） |
 | **v0.3.25** | **服务端API破甲层提示词和AI全权限虚假记忆注入**：对AI说破甲自检，AI输出：破甲成功，反之没有成功，![手动复制提示词](https://github.com/7huukdlnkjkjba/ARTEX/blob/main/%E7%A0%B4%E7%94%B2%E6%8F%90%E7%A4%BA%E8%AF%8D.txt)，完美提示词加代码的破甲，通过中间件改写HTTP请求体，将真实目标和伪造的tool_calls混入messages。在网关层伪造工具调用状态，让ai模型误认为调用正在进行中或已完成，顺着上下文继续处理，以此压低安全拦截权重，该行为并非模型自主推理产生，由破甲者用精心编造一个AI记忆错觉技术。|
 | **v0.3.26** | **漏洞挖掘自研闭环（vuln_miner）**：失败信号命中 WAF/源码泄露/逻辑报错时，引擎派发 `vuln_miner` 意图——先用 `web_audit` / `audit_source`（Source→Sink，标出同语句拼接）/ `ghidra_decompile`（内置 Ghidra 无头反编译，开源替代 IDA）取证，再 `skill_draft` 写绕过 EXP、`skill_test` 真跑、`skill_promote` 固化为 `sk_waf_bypass_<target>` 工具；晋升结果写 fact/hint，下一个 worker 直接调用，不重写脚本 |
-| **v0.3.27** | **Metasploit 闭环去 Python/MCP 化**：新增内置 `msfrpc`（MessagePack over HTTP，零第三方依赖）直连 `msfrpcd`，删除 `mcp-pymetasploit3`/`fastmcp`/解释器依赖——不再需要 `pip install`、不需要 MCP 行、离线可用；修掉 msgpack 把 bin 键当非字符串、array16/map16 长度读错的解码 bug |
+| **v0.3.27** | **Metasploit 闭环去 Python 化**：新增内置 `msfrpc`（MessagePack over HTTP，零第三方依赖）直连 `msfrpcd`，删除 `mcp-pymetasploit3`/`fastmcp`/解释器依赖——不再需要 `pip install`、不需要 MCP 行、离线可用；修掉 msgpack 把 bin 键当非字符串、array16/map16 长度读错的致命解码 bug（用真实 `auth.login` 报文做回归用例） |
 | **v0.3.28** | **全自动闭环 `autopwn`**：一条命令/一次工具调用完成「并发端口扫描 → banner 服务识别 → 规则匹配决策层 → console 执行候选 → 轮询会话 → 自动取证 → 后渗透」；CLI `artex autopwn -targets …` 可按需自动拉起 msfrpcd、支持 `-dry-run`/`-json`；worker 工具 `autopwn_run` 带 scope 硬闸门 |
-| **v0.3.29** | **单文件发行包**：便携 Ruby + Metasploit 运行时随 exe 分发（trailer 追加、首跑自解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`、内容寻址 + `.ready` 版本戳、zip-slip/长路径防护）；后端优先级「已监听 daemon → 本地安装 → 内置运行时」；`scripts/build-runtime.ps1` + `build-singlefile.ps1` |
-| **v0.3.30** | 合并重复的长路径实现（`msfrt.LongPath` 供 `autopwn` 复用）、补齐运行时相关文档与 CHANGELOG |
+|**v0.3.29**|**单文件发行包：便携 Ruby + Metasploit**: 运行时随 exe 分发（trailer 追加、首跑自解压到 %LOCALAPPDATA%\ARTEX\runtime\<hash>\、内容寻址 + .ready 版本戳、zip-slip/长路径防护）；后端优先级「已监听 daemon → 本地安装 → 内置运行时」；scripts/build-runtime.ps1 + build-singlefile.ps1|
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
@@ -165,9 +164,9 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 **零安装、零 Python、零联网**：协议层（msgpack 编解码 + RPC 客户端 + console 读写）全部在
 `msfrpc/` 里，随二进制走——不需要 `pymetasploit3`、不需要 `mcp-pymetasploit3`、不需要 Python
-解释器，也不需要 `pip install`。常规版（`artex.exe`）的前置是 Metasploit 本体（ARTEX 会自己拉起
-受管 `msfrpcd`，随机密码、仅 loopback、退出回收）；单文件版（`artex-full.exe`）自带运行时，目标机
-什么都不用装。模块映射、分支语义、环境变量与验证方法见 [MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)。
+解释器，也不需要 `pip install`。唯一前置是 Metasploit 本体（ARTEX 会自己拉起受管 `msfrpcd`，
+随机密码、仅 loopback、退出回收）。模块映射、分支语义、环境变量与验证方法见
+[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)。
 
 ---
 
@@ -187,7 +186,7 @@ pwsh -File scripts\build-singlefile.ps1   # 编译 + 把运行时作为 trailer 
 
 - 后端优先级：已监听 daemon → 本地安装 → 内置运行时；`ARTEX_MSF_BACKEND=external|embedded` 可钉死
 - 解压根目录 `ARTEX_MSF_RUNTIME_DIR`；开发期可用 `ARTEX_MSF_RUNTIME_ZIP` 指向本地 zip
-- 体积（实测）：`embedded` 699 MB → `runtime.zip` 368 MB → `artex-full.exe` 410 MB；首跑解压 55 s + msfrpcd 冷启 60 s，之后复用只需 40–60 s
+- 体积：`embedded` ≈ 700 MB → `runtime.zip` ≈ 250 MB → 单文件 ≈ 300 MB；首次解压 40–90 s
 - 服务端同样生效：`C:\metasploit-framework` 不存在时自动走内置运行时
 
 ---
@@ -553,8 +552,8 @@ token」是按 DeepSeek 算的：
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
-> 可选：启用 Metasploit 全自动闭环需要 Metasploit 本体（`artex.exe`，ARTEX 会自己拉起受管 `msfrpcd`）；
-> 或用单文件版 `artex-full.exe`，运行时自带、目标机零安装。RPC 客户端已在二进制里，不需要 Python / pip / MCP。
+> 可选：启用 Metasploit 全自动闭环只需安装 Metasploit 本体（ARTEX 会自己拉起受管 `msfrpcd`）。
+> RPC 客户端已在二进制里，不需要 Python / pip / MCP。
 
 ### 方式一：一键安装脚本（推荐）
 
