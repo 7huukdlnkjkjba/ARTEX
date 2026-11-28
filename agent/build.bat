@@ -1,4 +1,4 @@
-go build -tags embedui -trimpath -ldflags "-s -w -buildid= -X main.version=17.11-10-g10bd0eb-dirty" -o artex.exe ./cmd/artex
+
 @echo off
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
