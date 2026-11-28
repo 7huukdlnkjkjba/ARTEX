@@ -27,6 +27,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **v0.3.26** | **漏洞挖掘自研闭环（vuln_miner）**：失败信号命中 WAF/源码泄露/逻辑报错时，引擎派发 `vuln_miner` 意图——先用 `web_audit` / `audit_source`（Source→Sink，标出同语句拼接）/ `ghidra_decompile`（内置 Ghidra 无头反编译，开源替代 IDA）取证，再 `skill_draft` 写绕过 EXP、`skill_test` 真跑、`skill_promote` 固化为 `sk_waf_bypass_<target>` 工具；晋升结果写 fact/hint，下一个 worker 直接调用，不重写脚本 |
 | **v0.3.27** | **Metasploit 闭环去 Python 化**：新增内置 `msfrpc`（MessagePack over HTTP，零第三方依赖）直连 `msfrpcd`，删除 `mcp-pymetasploit3`/`fastmcp`/解释器依赖——不再需要 `pip install`、不需要 MCP 行、离线可用；修掉 msgpack 把 bin 键当非字符串、array16/map16 长度读错的致命解码 bug（用真实 `auth.login` 报文做回归用例） |
 | **v0.3.28** | **全自动闭环 `autopwn`**：一条命令/一次工具调用完成「并发端口扫描 → banner 服务识别 → 规则匹配决策层 → console 执行候选 → 轮询会话 → 自动取证 → 后渗透」；CLI `artex autopwn -targets …` 可按需自动拉起 msfrpcd、支持 `-dry-run`/`-json`；worker 工具 `autopwn_run` 带 scope 硬闸门 |
+|**v0.3.29**|**单文件发行包：便携 Ruby + Metasploit**: 运行时随 exe 分发（trailer 追加、首跑自解压到 %LOCALAPPDATA%\ARTEX\runtime\<hash>\、内容寻址 + .ready 版本戳、zip-slip/长路径防护）；后端优先级「已监听 daemon → 本地安装 → 内置运行时」；scripts/build-runtime.ps1 + build-singlefile.ps1|
 
 - 内网能力说明：[README-FORK.md](README-FORK.md)、`INTRANET-PIVOT-DESIGN.md`、`HONEYPOT-DETECTION-DESIGN.md`
 - Metasploit 闭环：[MSF-CLOSED-LOOP.md](MSF-CLOSED-LOOP.md)
