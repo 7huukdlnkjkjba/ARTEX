@@ -135,7 +135,7 @@ func findSQLMap() (sqlmapRunner, error) {
 			continue
 		}
 		if strings.HasSuffix(strings.ToLower(p), ".py") {
-			py := msfPythonBin()
+			py := pythonBin()
 			if py == "" {
 				return sqlmapRunner{}, fmt.Errorf("找到 %s 但没有 Python 解释器", p)
 			}

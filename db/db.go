@@ -294,15 +294,16 @@ ON CONFLICT (name) DO NOTHING`,
 		`["@playwright/mcp","--headless"]`); err != nil {
 		return fmt.Errorf("seed browser mcp: %w", err)
 	}
-	// Seed the built-in Metasploit MCP server (stdio, DISABLED by default). The
-	// Python package must be installed (`pip install mcp-pymetasploit3`) and
-	// msfrpcd must be running; enable it in 系统 → MCP afterwards. Insert only if
-	// absent so a user's command/env edits survive restarts.
+	// The Metasploit closed loop no longer goes through MCP: msf_execute speaks
+	// msfrpcd's MessagePack API directly (msfrpc), so the old auto-seeded
+	// `metasploit` stdio row would only be a dead command. Drop it when it is
+	// still untouched (disabled + the exact seed values); a row the operator
+	// edited or enabled is left alone.
 	if _, err := d.Exec(`
-INSERT INTO mcp_servers(name, transport, command, args, env, enabled)
-VALUES ('metasploit', 'stdio', 'mcp-pymetasploit3', '[]', '{}', false)
-ON CONFLICT (name) DO NOTHING`); err != nil {
-		return fmt.Errorf("seed metasploit mcp: %w", err)
+DELETE FROM mcp_servers
+ WHERE name = 'metasploit' AND transport = 'stdio' AND command = 'mcp-pymetasploit3'
+   AND enabled = false AND args = '[]' AND env = '{}'`); err != nil {
+		return fmt.Errorf("cleanup legacy metasploit mcp seed: %w", err)
 	}
 	// NOTE: the placeholder ScopeSentry data-source MCP (empty URL + empty X-API-Key,
 	// disabled) is seeded directly in schema.sql §F so a raw `psql < schema.sql` init

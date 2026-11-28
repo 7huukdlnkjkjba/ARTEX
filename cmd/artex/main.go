@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/autopwn"
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/selfupdate"
 	"github.com/Autumn-27/artex/server"
@@ -55,6 +56,10 @@ func run() int {
 	// `artex doctor` 部署预检（期 6)：只读检查，在解析服务 flag / 起任何子系统之前分流。
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		return runDoctor(os.Args[2:])
+	}
+	// `artex autopwn` 一键闭环：扫描 → 识别 → 匹配 → 利用 → 后渗透，独立于 HTTP 服务。
+	if len(os.Args) > 1 && os.Args[1] == "autopwn" {
+		return autopwn.Main(os.Args[2:])
 	}
 
 	var (

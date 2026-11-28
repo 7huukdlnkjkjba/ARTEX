@@ -70,3 +70,9 @@ Thumbs.db
 
 # 内置 Ghidra（本地解压/软链接，体积大且不随仓库分发）
 /ghidra/
+
+# 内置 Metasploit 运行时（体积大，构建产物不入库）
+msfrt/runtime.zip
+/build/
+/artex-full.exe
+/artex.exe.new

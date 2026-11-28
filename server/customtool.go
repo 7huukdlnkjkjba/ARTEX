@@ -203,6 +203,18 @@ func detectPython() string {
 	return ""
 }
 
+// pythonBin is the interpreter used to run auxiliary .py tooling (impacket,
+// sqlmap, promoted scripts). ARTEX_PYTHON wins (ARTEX_MSF_PYTHON kept as a
+// legacy alias), otherwise the validated PATH detection above.
+func pythonBin() string {
+	for _, env := range []string{"ARTEX_PYTHON", "ARTEX_MSF_PYTHON"} {
+		if p := strings.TrimSpace(os.Getenv(env)); p != "" {
+			return p
+		}
+	}
+	return detectPython()
+}
+
 // pythonInterpreter resolves the interpreter: user-set > stored auto-detect > live
 // detect. "" only when truly none found.
 func (s *Server) pythonInterpreter() string {

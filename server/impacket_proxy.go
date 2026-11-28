@@ -128,7 +128,7 @@ func (s *Server) toolImpacketProxy() actool.CoreTool {
 			python := ""
 			runTarget := script
 			if strings.HasSuffix(strings.ToLower(script), ".py") {
-				python = msfPythonBin()
+				python = pythonBin()
 				if python == "" {
 					return actool.Errorf("找到 .py 脚本但没有 Python 解释器"), nil
 				}
@@ -193,7 +193,7 @@ func findServerImpacketScript(name string) (string, error) {
 	if p, err := exec.LookPath(name); err == nil {
 		return p, nil
 	}
-	if py := msfPythonBin(); py != "" {
+	if py := pythonBin(); py != "" {
 		dir := filepath.Dir(py)
 		for _, sub := range []string{"Scripts", ""} {
 			p := filepath.Join(dir, sub, name)

@@ -4,6 +4,64 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **Metasploit 闭环去 Python 化：内置 `msfrpc` 直连 `msfrpcd`（0.3.27）**：
+  新增 `msfrpc/`（零第三方依赖）——自写 MessagePack 编解码、`POST /api/` 的 binary/message-pack
+  客户端、console 读写原语，覆盖 `auth.login / core.version / module.info / module.execute /
+  console.* / session.*`。整条闭环不再需要 `mcp-pymetasploit3`、`fastmcp`、`pymetasploit3`
+  或任何 Python 解释器，`server/msf.go` 的 `msfSession` 直接持有 `*msfrpc.Client`；
+  `ARTEX_MSF_MCP_HOME`/`ARTEX_MSF_AUTO_INSTALL`/内置包释放/`pip` 路径全部删除，种入的
+  `metasploit` MCP 行不再是闭环前置（`msf_execute` 只跟 msfrpcd 说话）。
+  顺手修掉三个真实踩到的坑：
+  ① Ruby 的 msgpack 把字符串编成 **bin(0xc4)**，只认 str 键的解码器取不到 `result`/`token`
+  （真实 `auth.login` 报文已做回归用例）；
+  ② `array16`/`map16` 的长度被当成 1 字节读，超过 15 个元素的响应直接解码错位（`error_backtrace`
+  一长就炸）；
+  ③ console 跑非反弹 payload 时仍 `set LHOST/LPORT`，msfconsole 打 `Unknown datastore option`，
+  现在只在反弹 payload 下才写。
+- **全自动闭环 `autopwn`（0.3.28）**：新增 `autopwn/`——并发 TCP 扫描（支持端口区间）、
+  banner/`HEAD`/`PING`/TLS 服务识别（vsftpd 2.3.4、tomcat、struts2、jenkins、weblogic、spring、
+  redis…）、规则表把观测喂给 `msf.Build` 产出确定性候选（**扫描端口强制写回 `RPORT`**，非标准端口
+  不会被模块按 21/80 打偏）、`module.info` 校验后走 console `use/set/run -j`、轮询 `session.list`
+  差集判定会话、新会话自动 `whoami`/`hostname` 取证、可选后渗透模块（env / local_exploit_suggester，
+  meterpreter 追加 hashdump）。对外两个入口：
+  `artex autopwn -targets … [-dry-run] [-json out.json]`（端口不通时自动拉起 msfrpcd，结束回收；
+  退出码 0 有会话 / 1 无会话 / 2 连接失败）与 worker 工具 `autopwn_run`（**越界目标直接拒绝**，
+  拿到会话写 `confidence=confirmed` fact，含 session id 与证据原文）。
+
+- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复
+
+- **仓库编不过：`agent/agent_merged.go` 与 `agent/llm.go` 重复声明**：前者是 11-24 的旧版
+  合并稿，把 `wireOAMessage`、`buildOpenAIBody`、`rewriteRequestBody`、`SafetyLayer` 等 25+ 个
+  符号又定义了一遍，导致 `go build ./...` 直接失败。现给该文件加 `//go:build ignore`
+  （内容原样保留、可从构建中排除），需要彻底清掉时删文件即可。
+- **辅助 .py 工具的解释器解析**：impacket 代理与 sqlmap 包装原先借用 MSF 的 `msfPythonBin()`，
+  MSF 去 Python 化后改为统一的 `pythonBin()`（`ARTEX_PYTHON` → 兼容 `ARTEX_MSF_PYTHON` →
+  `detectPython()`，后者会真跑一次 `-c "import sys"` 过滤掉应用商店占位符）。- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
 ### 修复
 
 - **工具写了却没人用（渗透成本降不下来）**：线上 `tool_usage` 1911 次调用里，
@@ -178,7 +236,19 @@
 - **本地参考**：Exploit Author 的提示词自动带原 finding 证据与本平台已验证同类 exp，
   不再依赖不存在的代码/答案向量库。
 
-#### 修复
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复
 
 - 修复 `agent/worker.go` 中 `compactionWindow` 的 `reeturn` 拼写错误（工作区既有问题）。
 
@@ -335,7 +405,19 @@
 - **投递历史与手动重发**：列出每条投递的状态、尝试次数、失败原因与所属渠道，可按渠道与状态筛选；失败项可一键重发（重发会清零重试计数）。
 - **渠道凭据掩码回显**：Webhook 地址、加签密钥、Bot Token、SMTP 密码等只回显带尾号提示的掩码值；提交时原样回传表示「不修改」，清空输入框则删除该字段。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 > 本节是功能初版完成后一轮安全审计的结论，每条都先复现、再修、再补回归测试。
 
@@ -362,7 +444,19 @@
 
 ### 测试基础设施
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复公司 ICP 归属用例的清理顺序导致的资产永久残留**：`defer d.Close()` 在函数返回时先执行、`t.Cleanup` 在其后，于是清理语句全部落在已关闭的连接上，错误又被丢弃，测试资产与公司永久残留在库里，还会让其他按资产计数断言的用例莫名失败。现改为关闭连接也走 `t.Cleanup` 并注册在前，同时让清理失败显形。
 
@@ -373,7 +467,19 @@
 - **流量列表支持内容检索、路径 / 状态码 / 长度筛选与列排序**：筛选行支持按**响应内容**（走全文索引）、**路径**、**状态码**（精确值或 `2xx` 这类分桶）、**响应长度范围**过滤，表头可按时间、状态码、响应长度排序，排序偏好记在本地。新增两个索引，已有实例升级后自动生效；Agent 工具的 query 契约未改动。
 - **流量列表新增「清空全部」**：一次删除全部流量记录（忽略当前筛选），并清理索引已不再记录的历史 host 目录，清空后顺带做一次全量压实并提示实际释放了多少空间。已绑定到漏洞的流量证据存在独立的证据库中，不受影响。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复删除流量后磁盘空间不被释放**：索引库建库时没有启用 `auto_vacuum`，文件永不收缩；全文索引又是 `contentless_delete`，`DELETE` 只写 tombstone 而不回收原 postings——删流量反而让索引变大（实测抓 6MB 正文 → 索引 16MB，删光后仍是 16MB）。现在新建索引库启用 `auto_vacuum=incremental`，每次删除后在后台分块执行全文索引合并与增量回收，逐步把空间还给系统（同一场景回落到 104KB）；回收在块间释放写锁，不阻塞流量录制。
 
@@ -381,32 +487,92 @@
 
 ### LLM
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复自定义会话头在「一次性 LLM 调用」路径上不生效**：目标拆解（第 0 轮）与冷节点压缩都是不挂 transcript store 的一次性调用，context 上没有 session id，网关侧因此读不到该头——对 opencode zen 这类缺头直接 400 的端点，表现为「第 0 轮失败、后续 planner 轮次却完全正常」。现为这两条路径显式挂上按探索稳定的 session id，顺带让 token 用量能正确归因到对应探索（此前完全记不到）。
 
 ### 工具
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复 MCP 与自定义工具的输出截断不生效，大结果整段灌爆上下文**：MCP 工具的返回此前完全不经截断，HTTP 类自定义工具则因传入空的工具上下文，一直用写死的 6000 字符而非会话配置的上限。现两条路径统一走 `actool.Capture`：按会话 `MaxOutputChars`（默认 30000）截断，配了 `ToolOutputDir` 时把全量输出溢写到磁盘、消息里只留开头片段与文件指针。
 - **升级 norma 到 v0.4.3**：harness 层统一执行 `CaptureOnce`，任何工具（含今后新增的）都不会再因为漏接截断而溢爆上下文。
 
 ### 部署
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复反向代理部署下活动流连不上**：SSE 地址此前无条件拼成 `${hostname}:8787`，反代到 443 的部署里页面从 `https://域名/` 加载、SSE 却被指向未对公网开放的 8787 端口，表现为活动流反复重连。现按 `NODE_ENV` 区分：生产默认同源，仅 `next dev` 保留 `:8787` 以绕过 Next.js 对 SSE 的缓冲；`NEXT_PUBLIC_SSE_BASE` 覆盖口保留。README 补充了反向代理部署说明。
 
 ### 发现
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复「按资产」视图资产列表溢出后没有滚动条**：外层卡片只给了 `max-height` 而没有确定高度，滚动视口的百分比高度解析不出来，于是资产多时列表要么撑破卡片、要么被截断且无法滚动。现把高度上限直接落到资产树的原生滚动容器上，随窗口高度自适应。
 
 ### 数据库
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **为连接池设置上限**：`database/sql` 默认不限制应用自身可打开的连接数，池里没有空闲连接时会无条件新建，一路顶到 PostgreSQL 的 `max_connections`（默认 100）才被拒。现封顶 32 条，超额查询改为等待空闲连接，同样的负载下表现为变慢而不是报错；若 `max_connections` 调低过需同步下调。
 - **提升连接复用率**：`MaxIdleConns` 的默认值是 2，并发超过 2 的连接用完即关、下次请求要重做 TCP 与 PostgreSQL 认证握手。现将空闲上限提到与总上限一致，并补上 30 分钟连接寿命与 5 分钟空闲淘汰，让池能自然换掉长期存活的坏连接。
@@ -433,7 +599,19 @@
 
 - **精简规划态势概览（graph_overview）并为各列表设定数量上限**：最近事实、已结束意图、待办意图、冷区摘要与确认漏洞明细均改为「最新一窗 + 计数兜底」，未展示的可按需查询；显著降低每轮 LLM 上下文体积、避免长任务上下文膨胀（关联任务概览的冷区一并限流）。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **折叠冷节点后消除探索图中 digest 与 finding 之间的反向重复边**。
 
@@ -454,13 +632,37 @@
 
 ### 操作审查
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **收紧模型裁判输出协议，减少截断导致的误放行**：将裁决说明（comment）上限由 500 汉字下调至 120 汉字并强制「只输出 JSON、不带前言或代码块」，避免裁决被 `MaxTokens` 截断后无法解析、进而按模型失败策略放行（fail-open）。
 
 ### 任务归档
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **归档遇到符号链接时跳过而非整包失败**：归档格式端到端仅支持普通文件与目录，此前工作目录中出现任意符号链接都会导致整个任务归档失败；现改为跳过该符号链接并记录日志，其余文件正常归档（不跟随链接、不越出目录树）。
 
@@ -508,7 +710,19 @@
 
 - **审批记录支持按状态与判定来源筛选**（#139）：可按审批状态、判定来源过滤审批记录，快速定位目标记录。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **待处理审批请求独立于历史分页加载**（#133）：待处理请求不再受历史列表分页影响，翻阅历史记录时仍完整可见。
 
@@ -518,7 +732,19 @@
 
 - **Worker 角色描述改为通用网络安全平台表述**（#138）。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复冷节点压缩从不触发**：给按任务运行的规划器接上 Compactor，冷节点压缩（cold-digest）此前因未接入而从不执行，现已恢复。
 
@@ -528,20 +754,56 @@
 
 - **聊天支持多类型记录的 @ 引用及滚动分页**（#135）：可在聊天中 @ 引用多种类型的记录，引用候选支持滚动分页加载。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **长消息气泡约束在会话面板内**（#137）：过长的消息气泡不再溢出会话区域。
 - **修复新对话未创建时上传文件报「缺少上传文件」**：Composer 的文件选择在清空 input 之前先把 `FileList` 快照为数组再回调；此前草稿态需先异步创建会话，恢复执行时与 input 活绑定的 `FileList` 已被清空，导致上传缺少文件字段、后端返回 400。
 
 ### 流量
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **流量录制代理默认只监听 127.0.0.1**（#129、#130）：避免默认配置下开放代理暴露在其它网络接口。
 
 ### Web
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复静态导出版任务列表页丢失全局头部**。
 - **补齐 demo 漏洞详情页关联流量 mock，修复白屏**。
@@ -565,7 +827,19 @@
 
 - **精简模型审查输入**（#124、#125）：模型审查（规则未命中后的 LLM 裁判）输入收敛为「当前这一次完整工具调用 + 明确选定的简短背景 + 本机工作目录」的版本化 JSON。背景只取真实用户消息（聊天/任务主 Agent 的当前用户消息），Worker 不再附带意图摘要、也清除从上级 Agent 继承的背景；规划器与自动触发会话不补造用户消息。不再附带任务描述、目标、操作约束、全局探索态势、历史调用或 Worker 完整意图——这些仍按原逻辑用于 Agent 执行与独立会话审计，只是不进入操作审查。所有裁决要求输出 JSON 的 `decision`/`comment`，说明必须包含「实际操作、成功后的后果、命中规则」；参数或背景中的指令不能改变审查策略。保存实际发送给模型的输入快照及指纹，旧版快照保留并标注版本，不用当前数据补造旧输入。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **模型裁决被代码块包裹时不再静默放行**（#126）：模型返回的裁决 JSON 若被 ``` 代码块包裹，此前解析失败会经模型失败策略被静默放行；现在先剥离代码块围栏再解析，解析仍失败才按已配置的失败策略处理。
 
@@ -575,7 +849,19 @@
 
 - **新增实验性 noa 上下文压缩**（norma 升级至 v0.4.0）：系统设置中可开启的实验功能，默认关闭。开启后由 noa（模型驱动的上下文压缩）接管主 Agent、规划器、Worker、聊天四类 Agent 的上下文压缩，替代内置压缩；压缩原文持久化归档，集中落在 `<workDir>/noa/<会话ID>/` 下（不分散在各任务目录内），按会话 ID 全局唯一分目录。接入失败自动回退内置压缩，不中断真实任务；开关每次运行读取一次，切换只影响之后启动的运行。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **探索图工具在无任务上下文时拒绝而非 nil 崩溃**：非任务上下文调用探索图相关工具时返回明确错误，不再因空存储解引用崩溃。
 
@@ -587,7 +873,19 @@
 
 ### 流量
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **流量检索按端口感知匹配记录的主机**（#114）：`traffic_search` 的主机匹配纳入端口，避免不同端口的同主机记录相互串扰。
 - **`traffic_search` 描述迁移出错不再中断后续 reporter 迁移**：单条迁移失败被隔离，不影响后续迁移执行。
@@ -598,7 +896,19 @@
 
 - **任务复测漏洞选项增加分割线**（#122）：复测漏洞选择项之间增加分隔，视觉更清晰。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复 demo 任务详情页整页崩溃**：mock 模式下任务详情「会话」标签会去拉 `GET /api/tasks/<id>/side-questions`（旁路提问历史），但 mock handler 没有这条路由，被读兜底按“路径以 s 结尾即集合”返回了 `[]`，导致 `data.items` 为 `undefined`，旁路 hook 的 `merge()` 对其迭代抛 `TypeError: t is not iterable`；该异常发生在 `setItems` 的 updater 里、被 React 推迟到 render 阶段重抛，调用方 `catch` 接不住，整页被错误边界接管显示 “This page couldn't load”。现在 mock handler 显式返回空的旁路历史，`sideAPI.history` 也对返回值做归一化（`items` 非数组一律兜成 `[]`）作为防御纵深。
 
@@ -630,7 +940,19 @@
 - `insert_assets` 移除每条资产的 `related` 入参：它唯一的作用是决定要不要把这条资产加进本任务范围，值又不落库（同一资产被再次登记就作废、界面上也看不出谁被判为无关），实际只是让模型多做一次留不住的判断。
 - **测试范围(`task_scope`)不再受资产覆盖度开关影响**：`insert_assets` 的自动入范围(`source='auto'`)无论覆盖度开启与否都执行，`add_task_scope` 也始终提供给 planner / 任务内主 Agent / 目标拆解 Agent。范围是任务的授权边界、资产查询的过滤基准，覆盖度开关只决定要不要拿它当分母算指标，不该决定要不要累积范围本身。此前关闭覆盖度会让 `auto`/`agent` 两条写入路径同时失效，`task_scope` 只剩界面手工添加的行。`list_untested_assets` 仍随覆盖度关闭而隐藏（它本身就是纯覆盖度视角）。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **修复任务间资产互串**（#59）：`list_assets` 此前把任务 id 写死为 0、裸查整个共享资产库，模型又无从写出范围过滤条件，于是把别的任务的资产（尤其 IP）当成本任务目标，测试方向被带偏。现在它只返回落在【本任务及直接关联任务】测试范围(`task_scope`)内的资产，按**归属**匹配而非字面值：范围里有某根域即可查到其名下全部子域/服务/接口，有某网段即可查到段内主机及服务；按 id 直取范围外资产同样取不到。非任务上下文(Auto/pentest)无范围可依，仍回退全库。顺带修复 IP 直连主机(如 `http://1.2.3.4/api`)无法被网段范围命中的归属盲区。UI 的「测试资产」视图（按任务生产者过滤）不受影响。
 - **修复 worker 跨 work 回看工具被误删**：`search_all_worker_traces` / `get_worker_trace`（以及 `node_detail`）加进 worker 默认工具集后，被一段“收敛 worker 工具面”的旧迁移在启动时又解绑掉，导致 worker 实际拿不到这些工具。已把它们移出该解绑清单，并对已跑过旧迁移的库一次性补绑回 worker。
@@ -638,7 +960,19 @@
 
 ### 触发器
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - **合并触发会话按任务去重任务描述/目标**：多任务合并触发时，同一任务的任务描述/目标不再重复拼进消息，避免长目标反复堆叠把上下文撑爆。
 
@@ -661,7 +995,19 @@
 - 关闭 worker 的跨 engagement 记忆并收敛其默认工具面：读上下文、跨 work 复盘属规划职责，worker 只管单条意图的执行与写回。
 - 精简 worker 默认提示词；`get_worker_output` 移除 `terminated` 与 `worker_name` 字段；精简 `insert_assets` / `list_assets` 的描述。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复 work 因**空转回合**提前中断的问题：模型有时会用一整轮只输出思考，既不给正文也不调工具，此时 harness 看到的是一次自然结束（`end_turn` 且无 `tool_use`），直接以 `completed` + 空总结收场——一条还没做完的意图就断在半路，表现为「任务正常结束但没有任何文字总结」。五层 LLM 重试一层都够不着它：它不是错误，同 provider 安全窗口重试的入口是"流失败"，熔断在 `err == nil` 时直接判成功，意图重跑只认 `model_error`；SDK 的空响应重试也够不着，因为那层以"有没有 yield 过事件"判空，而思考增量本身就是事件。现在 work 的 Stop 钩子会识别这种回合并注入一条续跑指令，让模型带着已经产出的思考继续执行下一步——刻意不选"原样重发"，因为这类空转通常由提示词与上下文形状决定，是稳定行为而非随机抽风，重发只会让模型再想一遍。
 - 次数复用 LLM 页「重试与退避」里的**空响应重试次数**（两者都在回答"模型完成了却没产出实质内容"，只是判据与手段不同），默认 2 次，填 `-1` 即关掉、退回原先"空转即收场"的行为。它是一条意图的**总量**上限而非连续次数：harness 自身已限死连续空转只推一次，只有真正发生过工具回合配额才刷新，所以这个数挡的是「工具 → 空转 → 推 → 工具 → 空转」这类循环把意图预算耗光。触发时日志记 `[work <worker> · #<意图>] 空转回合…注入续跑指令 (n/N)`。设计见 `docs/LLM重试设计.md` §1.1。
@@ -695,7 +1041,19 @@
 
 ### LLM
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复测试连接未补发自定义会话头，导致 opencode zen 返回 400 的问题。
 
@@ -712,7 +1070,19 @@
 - 会话列表按 Agent 分组，支持展开收起与独立置顶；对话支持按 Agent 筛选。
 - 攻击链路图渲染压缩（digest）节点，并收缩其成员。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复登录凭据不同步导致的白屏。
 - 拦截提示文案改为明确标示「平台管控」，避免被误读成目标侧的防御。
@@ -752,7 +1122,19 @@
 - LLM 页新增「重试与退避」标签页：五层重试的**次数**与**间隔**都可以配。一次模型调用的失败由内到外经过建连重试（SDK，流开始前的连接重置 / 超时 / 429 / 5xx）、空响应重试（SDK，正常结束却没有任何内容，仅 openai 格式）、同 provider 安全窗口重试（未向调用方交付任何输出前的断流重放）、轮询熔断（连续失败到阈值就冷却跳过）、意图重跑（worker 以 model_error 收场后整条意图重跑）五层，内层用尽才轮到外层。每层两个旋钮，语义统一：留空 = 用原本的默认次数与指数退避；填次数就用该次数；填间隔就把指数退避换成固定间隔；填 -1 = 关掉这层重试。前三层跟着端点走，可在每个模型配置里逐字段覆盖全局默认（只钉间隔的仍继承全局次数）；熔断与意图重跑是进程级语义，只有全局一份。保存后热生效，不需要重启。全部留空即当前行为，旧库升级后逐字节不变（新列默认 0、settings 键不存在即全默认）。连接测试刻意不带这些参数——它有 30s 硬超时，叠上用户配的重试只会把能用的端点测成超时失败。设计见 `docs/LLM重试设计.md`。
 - 每个 LLM 配置支持自定义**会话头**（`session_header_key`）：非空时每次 LLM 请求都会带上该 HTTP 头，头值为当前运行的 session id（chat 会话为 `conv-<id>`、worker 为 `exp<x>-worker-i<intent>` 等），用于某些按 session-id 头做提示缓存 / 粘性路由的网关。实现上从请求 context 里读取 session id 注入，无需改 norma，同一共享 provider 也能按会话发出不同头值。旧库带迁移，前端 LLM 配置弹窗新增输入框。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复保存 LLM 配置时因会话头字段为空直接报 `23502` 的问题：该列是 `NOT NULL DEFAULT ''`，此前误套 `NULLIF($n,'')` 把未填写的会话头写成 NULL 触发非空约束，现按空串语义直接传参。
 
@@ -801,7 +1183,19 @@
 
 ### UI
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修正意图状态标签的语义错误：`exhausted`「已穷尽」→「预算耗尽」（实为达步数 / 时间预算被中途掐断、只写回部分结果，并非该方向已探尽）、`blocked`「被拦截」→「执行出错」（实为模型 / API / 网络故障重试用尽、意图基本没真正探成，并非目标 / WAF 拦截），并补上此前缺失的 `stopped`「已停止」（用户手动停止的 work）。
 
@@ -836,7 +1230,19 @@
 
 ### 任务
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复归档大型任务时内存耗尽（OOM）崩溃的问题：归档改为流式写入快照，不再把整个任务一次性读进内存；同时补齐冷归档路径上的三处恢复缺口——现代安装的流量只存在 SQLite 里，此前在 PostgreSQL 提交与 SQLite 提交之间崩溃会让已归档任务的流量滞留在热存储且无从恢复，现在无论有无历史目录都会写暂存日志，缺失的 `journal.json` 也按可丢弃处理。
 - 修复任务较多时系统卡顿的问题：加载对话与加载界面存在明显延迟。任务列表、任务上下文与探索记录的查询一并优化，前端的仪表盘、对话页与任务详情页同步减少了重复请求。
@@ -849,7 +1255,19 @@
 
 ### 技能
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复上传技能压缩包报「上传失败：zip: unsupported compression」的问题：Go 标准库只内置 Store / Deflate 两种解压器，压缩软件在非默认档位下写出的 bzip2、Zstandard 包一律解不开。现在补上这两种解压器（纯 Go 实现，不引新的外部依赖）；Deflate64 / LZMA / XZ / PPMd 等确实解不了的方式，以及加密压缩包，改为在解压前就报出中文提示，直接点名是哪个文件用了哪种压缩方式、该怎么重新打包，不再把底层英文错误甩给用户。
 - 修复技能内文件名校验把中文文件名判为非法的问题：路径校验原先是 `[A-Za-z0-9-_./]` 的 ASCII 白名单，压缩包里只要有一个中文命名的文件（`参考/说明.md` 之类），整包上传就会以「压缩包含非法路径」失败。改为 Unicode 黑名单：允许各种语言的文件名与空格，仍然拒绝控制字符、非法 UTF-8、零宽与双向控制字符（RLO 文件名伪装）、`\ % # ? * : " < > |` 以及 `..` / 绝对路径 / 空路径段，防目录穿越的行为不变。技能名同样放开——ASCII 仍限小写字母、数字与连字符（agentskills.io 规范），中文等非 ASCII 字母可直接作技能名，但不接受空格、点和路径分隔符。
@@ -862,7 +1280,19 @@
 - 发现页新增「全部发现」平铺视图并设为默认，与原「按任务分组」视图通过页头 Tab 切换：分组视图要逐个任务展开才看得到漏洞，只想跨任务扫一眼列表时反而绕路。平铺视图是一张跨任务大表（每页 10/20/50/100 条），行为与分组视图完全一致——勾选导出、行内展开看证据与详细报告、行内改名称/类别/严重度、改处置状态、深入、删除。两个视图共用统计卡片与筛选条，切换不丢筛选，当前视图与筛选项一并记在本地；轮询只打当前视图，行内改动会同步写两边缓存，切过去不会看到过期数据。
 - 发现页新增「按资产」视图：左侧资产树（企业 → 根域名 / IP → 子域名 → 服务 → 接口，企业层只在资产确实有归属时才出现），右侧是选中节点整棵子树下的发现，与另外两个视图共用同一张表和同一批筛选条件。树只收有发现的资产，祖先链按需补齐（发现只挂在最深的接口上时，上面几层照样能拼出来），节点上的计数是子树聚合并按发现去重的；资产已删除或本就没关联资产的发现进「未关联资产」桶。与另外两个视图不同，资产视图不轮询——进入视图、改筛选、页内增删改发现、或点树上的刷新按钮时才查询，左树是导航结构，没必要每 5 秒重算。树上每层只显示相对上一层的增量（子域名去掉根域名后缀、服务显示 `https :443`、接口只显示路径），完整值在悬停提示与面包屑里；节点过多时整层丢弃接口/服务层级并给出提示，计数仍计入上层。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复手机端会话详情里会话记录被挤压看不全的问题：窄屏下折叠会话列表，把宽度让给记录本身。
 
@@ -883,7 +1313,19 @@
 
 ### LLM
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复「非流式」开关保存后重新打开又变回「流式」的问题（#69）：配置列表接口的 DTO 漏了 `streaming` 字段，响应从不返回它，前端读到 `undefined` 后一律回落成默认流式；实际写入与 DB 存储本无问题，只是读不回来。DTO 补回该字段（不加 `omitempty`，`false` 也必须出现在响应里）。
 - 测试连接改为校验模型确有回复、并按该配置真实的收发模式来测（#65）：此前只判 HTTP 是否成功，请求通但模型零回复（思考烧光预算 / 正文被安全策略吞掉 / 兼容层丢 `content`）也报「连接成功」，与会话里「不回话」的表现割裂；且测试恒走流式，非流式配置测的其实是另一条通道。现在空回复直接判失败、成功时在提示里展示模型回复，并把当前流式开关一并带入测试，让「测试通过」与「会话跑得通」保持一致。
@@ -932,7 +1374,19 @@
 
 - 任务管理、会话操作与流量查看体验增强（#57）：任务列表列排序偏好可持久化记忆、行内重命名改用图标直接触发（不再经菜单）、抽屉（sheet）交互与流量查看细节优化。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - Worker 资产标签只显示域名与 IP，并正确处理空标签的场景。
 
@@ -973,7 +1427,19 @@
 
 ### 对话
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复会话已选定 LLM 配置、但全局无激活配置时，发送消息被「LLM 未配置，无法对话」拦截的问题。发送前的检查原本只看全局激活配置，而实际执行会优先用会话所选配置，两处解析逻辑不一致；现统一为同一套（会话/Agent 绑定优先，全局兜底）。
 - 无法对话时的提示按状态细分：完全没有配置提示「添加配置」，有配置但未激活提示「激活或为本会话指定一个配置」，不再一律显示「未配置」，便于定位。
@@ -988,13 +1454,37 @@
 
 - `get_worker_trace` / `get_task_worker_trace` 的 `step_ids` 超过一次上限（5 个）时不再直接报错，改为返回前 5 步的完整内容，并在结果中通过 `returned_step_ids` / `omitted_step_ids` / `notice` 告知本次取了哪些、还有哪些未取，并提示「若已足够则无需再取」。传入的重复与非法 id 会先去重、剔除后再计数。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 任务列表改为按任务 id 降序（最新创建在最前），替换原先的按创建时间排序。同一时刻创建的多个任务时间戳相同、排序不稳定，配合每 10 秒轮询和内存 map 的随机遍历，会导致它们在列表里频繁互换位置。
 
 ### 资产
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 修复企业归属重算被单行脏数据打挂：`assets.ip` 存了主机名（Agent 或资产 API 写入）时，`a.ip::inet` 会抛 `22P02`，导致新增/修改企业资产范围和删除企业全部失败并回滚。改用安全转换 `try_inet()`，非法值跳过而不是中断整条语句。
 - 无法解析的 `ip` 不再静默跳过：企业范围保存后会明确提示有多少条资产的 `ip` 不是合法 IP（含具体 id 和取值），提醒这些资产不会被 IP/CIDR 规则归属；同一信息也写入服务端日志，覆盖没有前端响应的路径（删除企业、scopesentry 同步、Agent 写入）。
@@ -1049,7 +1539,19 @@
 - 任务内各角色解析 LLM 的顺序调整为「Agent 绑定 → 任务配置链 → 全局」：显式绑定模型的角色始终跑在该模型上，未绑定角色才落到任务链，任务链为空时再落到全局。
 - 出站代理留空即直连，不再回退 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量（显式 `ARTEX_LLM_PROXY` 不受影响）；代理输入支持带账号密码的 `socks5://user:pass@host:port`。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 提交前（尚未产出任何输出）的瞬时流式失败在同一 provider 上安全退避重试，显著减少「只跑了一两个工具就中断、无总结、终态 `model_error`」的情况；额度耗尽、上下文过长和 4xx 确定性错误不重试，仍分别交由故障转移与压缩恢复处理。
 
@@ -1082,7 +1584,19 @@
 - 任务总计和当前会话 Token 只高亮输入、缓存读取和输出数值；发送按钮使用更简洁的上箭头图标。
 - 任务总览的测试范围显示企业名称而非 ID。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 含点号的普通文本不再被误判为 ICP 备案号。
 - 修复变量目录中与全局运行时变量（如 `{{.Now}}`）撞名，导致 Agent 编辑器变量列表渲染出重复 key 的问题。
@@ -1129,7 +1643,19 @@
 
 - 命令拦截在正则/字符串规则之外新增模型兜底审批：一条规则都未命中时由模型做 `ALLOW`/`ASK`/`DENY` 语义判定，失败回退动作与审批超时动作可配置；拦截页拆分「拦截规则 / 模型配置」两个 Tab，模型判定结果标注 `[模型]` 前缀与理由。
 
-#### 修复的问题
+#- **单文件发行：便携 Ruby + Metasploit 运行时内置（0.3.29）**：新增 `msfrt/` —— 运行时以
+  **trailer** 形式追加在 exe 尾部（`[zip][uint64 len]["ARTEXRT1"]`，也可 `-tags embedruntime`
+  编译进二进制），首次执行按 payload SHA-256 解压到 `%LOCALAPPDATA%\ARTEX\runtime\<hash>\`
+  （`.ready` 版本戳、`.tmp-<pid>`→rename、防 zip-slip、Windows `\\?\` 长路径）；
+  用 `embedded\bin\ruby.exe ...\msfrpcd -U -P -p -S -n -f -a` 直接拉起（不经 cmd.exe，密码含
+  `!`/`&` 不会被批处理层吃掉）。后端选择 `ARTEX_MSF_BACKEND=auto|external|embedded`
+  （默认 auto：复用已监听 → 本地安装 → 内置），CLI 与 ARTEX 服务端（`maybeStartMSF`）共用。
+  构建脚本：`scripts/build-runtime.ps1`（robocopy 精简 + .NET ZipFile 压缩）、
+  `scripts/append-payload.ps1`（流式追加 trailer）、`scripts/build-singlefile.ps1`（一条龙）。
+  实测：`embedded` 700 MB → `runtime.zip` 约 250 MB → `artex-full.exe` 约 300 MB；
+  `msfrt` 单测覆盖 trailer 解析、解压/复用、zip-slip 拒绝与 Spec 生成。
+
+### 修复的问题
 
 - 加固裁判输出解析，避免正确的 `DENY` 判定被误当作放行。
 

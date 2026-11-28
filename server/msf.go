@@ -15,6 +15,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/msf"
+	"github.com/Autumn-27/artex/msfrpc"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -69,7 +70,7 @@ func msfSchema() map[string]any {
 }
 
 func (s *Server) msfTools() []actool.CoreTool {
-	return []actool.CoreTool{s.msfPlanTool(), s.msfNextTool(), s.msfExecuteTool()}
+	return []actool.CoreTool{s.msfPlanTool(), s.msfNextTool(), s.msfExecuteTool(), s.autopwnTool()}
 }
 
 func (s *Server) seedMSFTools() {
@@ -157,42 +158,27 @@ func msfPlanError(err error) (actool.Result, error) {
 	return actool.Errorf(err.Error()), nil
 }
 
+// msfSession is one authenticated msfrpcd connection plus its endpoint.
 type msfSession struct {
-	client    mcpClient
-	tools     map[string]actool.CoreTool
-	name      string
-	host      string
-	port      int
-	plaintext bool
+	client *msfrpc.Client
+	host   string
+	port   int
+	ssl    bool
 }
 
-func (m *msfSession) tool(name string) (actool.CoreTool, bool) {
-	if t, ok := m.tools[name]; ok {
-		return t, true
-	}
-	for k, t := range m.tools {
-		if strings.HasSuffix(k, "__"+name) || strings.HasSuffix(k, "/"+name) || k == name {
-			return t, true
-		}
-	}
-	return nil, false
-}
+func (m *msfSession) Close() { m.client.Close() }
 
-func (m *msfSession) call(ctx context.Context, name string, in any) (string, error) {
-	t, ok := m.tool(name)
-	if !ok {
-		return "", fmt.Errorf("MCP 服务 %s 缺少工具 %s（检查 mcp-pymetasploit3 版本）", m.name, name)
-	}
-	raw, _ := json.Marshal(in)
-	res, err := t.Call(ctx, raw, nil)
+// sessionIDs snapshots the live session ids so a later poll can diff them.
+func (m *msfSession) sessionIDs(ctx context.Context) map[string]bool {
+	out := map[string]bool{}
+	list, err := m.client.Sessions(ctx)
 	if err != nil {
-		return "", err
+		return out
 	}
-	text := resultText(res)
-	if res.IsError {
-		return text, fmt.Errorf("%s 返回错误：%s", name, truncateForTool(text))
+	for id := range list {
+		out[id] = true
 	}
-	return text, nil
+	return out
 }
 
 func resultText(r actool.Result) string {
@@ -213,99 +199,39 @@ func truncateForTool(s string) string {
 	return s[:max] + "…"
 }
 
-func (s *Server) msfConnect(ctx context.Context) (*msfSession, error) {
-	if s.m == nil || s.m.pg == nil {
-		return nil, fmt.Errorf("数据库未就绪，无法读取 MCP 配置")
-	}
-	list, err := s.m.pg.ListMCP()
-	if err != nil {
-		return nil, err
-	}
-	var srv *db.MCPServer
-	for _, m := range list {
-		if m.Enabled && strings.EqualFold(strings.TrimSpace(m.Name), "metasploit") {
-			srv = m
-			break
-		}
-	}
-	if srv == nil {
-		cmd, args, ok := findMCPLauncher()
-		if !ok {
-			return nil, fmt.Errorf("未找到 mcp-pymetasploit3：请先 pip install mcp-pymetasploit3（或在「系统 → MCP」新建 stdio 服务）")
-		}
-		rawArgs, _ := json.Marshal(args)
-		srv = &db.MCPServer{Name: "metasploit", Transport: "stdio", Command: cmd, Args: rawArgs, Env: json.RawMessage("{}")}
-		log.Printf("[msf] 使用内置 MCP 配置拉起：%s %v", cmd, args)
-	}
-	c, err := connectMCP(ctx, srv)
-	if err != nil {
-		return nil, fmt.Errorf("连接 metasploit MCP 失败：%w", err)
-	}
-	tools, err := c.Tools(ctx)
-	if err != nil {
-		_ = c.Close()
-		return nil, fmt.Errorf("读取 metasploit MCP 工具失败：%w", err)
+// msfConnect dials msfrpcd and authenticates, trying both transport modes
+// unless the caller pinned one. Everything below it speaks msfrpc directly:
+// no MCP server, no Python interpreter, no external package.
+func (s *Server) msfConnect(ctx context.Context, password, sslMode string) (*msfSession, error) {
+	if password == "" {
+		return nil, fmt.Errorf("msfrpcd 需要密码：传 rpc_password，或设置 ARTEX_MSF_RPC_PASSWORD / 设置项 msf_rpc_password")
 	}
 	host, port := s.msfRPCAddrPort()
-	m := &msfSession{client: c, name: srv.Name, tools: map[string]actool.CoreTool{}, host: host, port: port}
-	m.plaintext = s.msfRPC != nil && s.msfRPC.Plaintext()
-	for _, t := range tools {
-		m.tools[t.Name()] = t
-	}
-	return m, nil
-}
 
-func (m *msfSession) ensureRPC(ctx context.Context, password, mode string) (string, error) {
-	info, _ := m.call(ctx, "get_client_info", map[string]any{})
-	if strings.Contains(info, `"connected": true`) || strings.Contains(info, `"authenticated": true`) {
-		return info, nil
-	}
-	if password == "" {
-		return "", fmt.Errorf("Metasploit RPC 未连接，且没有提供密码：传 rpc_password 或设置 ARTEX_MSF_RPC_PASSWORD/设置项 msf_rpc_password")
-	}
 	modes := []bool{false, true}
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "true", "1", "yes":
+	switch strings.ToLower(strings.TrimSpace(sslMode)) {
+	case "true", "1", "yes", "ssl":
 		modes = []bool{true}
-	case "false", "0", "no":
+	case "false", "0", "no", "plain":
 		modes = []bool{false}
 	}
+	// An ARTEX-managed msfrpcd is started with -S (plaintext); trying TLS first
+	// would only add a failed handshake to every call.
+	if s.msfRPC != nil && s.msfRPC.Plaintext() {
+		modes = []bool{false}
+	}
+
 	var lastErr error
 	for _, ssl := range modes {
-		host := m.host
-		if host == "" {
-			host = "127.0.0.1"
+		cl := msfrpc.New(msfrpc.Options{Host: host, Port: port, SSL: ssl})
+		if err := cl.Login(ctx, "msf", password); err != nil {
+			cl.Close()
+			lastErr = err
+			continue
 		}
-		port := m.port
-		if port == 0 {
-			port = 55553
-		}
-		txt, err := m.call(ctx, "connect", map[string]any{
-			"password": password, "host": host, "port": port, "ssl": ssl,
-		})
-		if err == nil && (strings.Contains(txt, `"authenticated": true`) || strings.Contains(txt, `"status": "connected"`) || strings.Contains(txt, `"status":"connected"`)) {
-			return txt, nil
-		}
-		if err == nil {
-			err = fmt.Errorf("connect 返回未认证：%s", truncateForTool(txt))
-		}
-		lastErr = err
+		return &msfSession{client: cl, host: host, port: port, ssl: ssl}, nil
 	}
-	return "", fmt.Errorf("连接 msfrpcd 失败（已尝试 ssl=%v）：%v", modes, lastErr)
-}
-
-func parseSessionIDs(text string) map[string]bool {
-	out := map[string]bool{}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &m); err != nil {
-		return out
-	}
-	for k := range m {
-		if _, err := strconv.Atoi(k); err == nil {
-			out[k] = true
-		}
-	}
-	return out
+	return nil, fmt.Errorf("连接 msfrpcd %s:%d 失败（已尝试 ssl=%v）：%v", host, port, modes, lastErr)
 }
 
 func diffSessions(before, after map[string]bool) []string {
@@ -361,17 +287,11 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 				log.Printf("[msf] scope 拒绝已放行：%s", why)
 			}
 
-			sess, err := s.msfConnect(ctx)
-			if err != nil {
-				return actool.Errorf(err.Error()), nil
-			}
-			defer sess.client.Close()
-
 			pw := a.RPCPassword
 			if pw == "" {
 				pw = os.Getenv("ARTEX_MSF_RPC_PASSWORD")
 			}
-			if pw == "" && s.m.pg != nil {
+			if pw == "" && s.m != nil && s.m.pg != nil {
 				pw, _, _ = s.m.pg.GetSetting("msf_rpc_password")
 			}
 			if pw == "" && s.msfRPC != nil {
@@ -381,21 +301,14 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 			if sslMode == "" {
 				sslMode = os.Getenv("ARTEX_MSF_RPC_SSL")
 			}
-			if sslMode == "" {
-				if sess.plaintext {
-					sslMode = "false"
-				} else {
-					sslMode = "auto"
-				}
-			}
-			if _, err := sess.ensureRPC(ctx, pw, sslMode); err != nil {
+
+			sess, err := s.msfConnect(ctx, pw, sslMode)
+			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			defer sess.Close()
 
-			before := map[string]bool{}
-			if txt, err := sess.call(ctx, "list_sessions", map[string]any{}); err == nil {
-				before = parseSessionIDs(txt)
-			}
+			before := sess.sessionIDs(ctx)
 
 			lp := a.LPORT
 			if lp == 0 {
@@ -410,9 +323,7 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 					break
 				}
 				attempted = i + 1
-				if _, err := sess.call(ctx, "get_module_info", map[string]any{
-					"module_type": c.ModuleType, "module_name": c.Module,
-				}); err != nil {
+				if _, err := sess.client.ModuleInfo(ctx, c.ModuleType, c.Module); err != nil {
 					transcript = append(transcript, map[string]any{"candidate": i, "module": c.Module, "step": "module_missing", "detail": err.Error()})
 					act = msf.Next(plan, i, msf.OutcomeModuleMissing)
 					continue
@@ -447,10 +358,7 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 				act = msf.Next(plan, i, msf.OutcomeNoSession)
 				transcript = append(transcript, map[string]any{"step": "no_session", "candidate": i})
 			}
-			after := map[string]bool{}
-			if txt, err := sess.call(ctx, "list_sessions", map[string]any{}); err == nil {
-				after = parseSessionIDs(txt)
-			}
+			after := sess.sessionIDs(ctx)
 			return jsonResult(map[string]any{
 				"plan_id":      plan.PlanID,
 				"attempted":    attempted,
@@ -467,11 +375,8 @@ func (s *Server) msfExecuteTool() actool.CoreTool {
 func waitNewSessions(ctx context.Context, sess *msfSession, before map[string]bool, seconds int) []string {
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 	for {
-		txt, err := sess.call(ctx, "list_sessions", map[string]any{})
-		if err == nil {
-			if got := diffSessions(before, parseSessionIDs(txt)); len(got) > 0 {
-				return got
-			}
+		if got := diffSessions(before, sess.sessionIDs(ctx)); len(got) > 0 {
+			return got
 		}
 		if time.Now().After(deadline) {
 			return nil
@@ -574,18 +479,8 @@ func normalizeScopeTarget(v string) string {
 	return strings.TrimSuffix(strings.ToLower(v), ".")
 }
 
-func (m *msfSession) createConsole(ctx context.Context) (string, error) {
-	txt, err := m.call(ctx, "create_console", map[string]any{})
-	if err != nil {
-		return "", err
-	}
-	var out struct {
-		CID string `json:"cid"`
-	}
-	if err := json.Unmarshal([]byte(txt), &out); err != nil || out.CID == "" {
-		return "", fmt.Errorf("create_console 返回异常：%s", truncateForTool(txt))
-	}
-	return out.CID, nil
+func (m *msfSession) createConsole(ctx context.Context) (int, error) {
+	return m.client.ConsoleCreate(ctx)
 }
 
 func (m *msfSession) runCandidate(ctx context.Context, c msf.Candidate, lport, seconds int) (string, error) {
@@ -593,7 +488,7 @@ func (m *msfSession) runCandidate(ctx context.Context, c msf.Candidate, lport, s
 	if err != nil {
 		return m.execDirect(ctx, c, lport)
 	}
-	defer func() { _, _ = m.call(ctx, "destroy_console", map[string]any{"console_id": cid}) }()
+	defer func() { _ = m.client.ConsoleDestroy(ctx, cid) }()
 
 	var script strings.Builder
 	fmt.Fprintf(&script, "use %s\n", c.Module)
@@ -615,16 +510,15 @@ func (m *msfSession) runCandidate(ctx context.Context, c msf.Candidate, lport, s
 		fmt.Fprintf(&script, "set LPORT %d\n", lport)
 	}
 	script.WriteString("run -j\n")
-	if _, err := m.call(ctx, "write_console", map[string]any{"console_id": cid, "command": script.String()}); err != nil {
+	if err := m.client.ConsoleWrite(ctx, cid, script.String()); err != nil {
 		return "", err
 	}
 
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 	var out strings.Builder
 	for {
-		txt, err := m.call(ctx, "read_console", map[string]any{"console_id": cid})
+		data, busy, err := m.client.ConsoleRead(ctx, cid)
 		if err == nil {
-			data, busy := consoleData(txt)
 			if data != "" {
 				out.WriteString(data)
 			}
@@ -645,41 +539,33 @@ func (m *msfSession) runCandidate(ctx context.Context, c msf.Candidate, lport, s
 	return out.String(), nil
 }
 
+// execDirect is the console-less fallback: module.execute only carries the core
+// options, so TARGETURI-style parameters are lost when a console is unavailable.
 func (m *msfSession) execDirect(ctx context.Context, c msf.Candidate, lport int) (string, error) {
-	args := map[string]any{"module_type": c.ModuleType, "module_name": c.Module}
-	if c.Payload != "" {
-		args["payload"] = c.Payload
-	}
-	if v, ok := c.Options["RHOSTS"]; ok {
-		args["rhosts"] = v
-	}
-	if v, ok := c.Options["RPORT"]; ok {
-		if n, err := strconv.Atoi(v); err == nil {
-			args["rport"] = n
+	opts := map[string]any{}
+	for _, k := range []string{"RHOSTS", "RPORT", "LHOST", "SSL", "TARGETURI"} {
+		if v, ok := c.Options[k]; ok && v != "" {
+			opts[k] = v
 		}
 	}
-	if v, ok := c.Options["LHOST"]; ok {
-		args["lhost"] = v
+	if c.Payload != "" {
+		opts["PAYLOAD"] = c.Payload
 	}
 	if lport > 0 {
-		args["lport"] = lport
+		opts["LPORT"] = lport
 	}
-	return m.call(ctx, "execute_module", args)
-}
-
-func consoleData(txt string) (string, bool) {
-	var v struct {
-		Data string `json:"data"`
-		Busy bool   `json:"busy"`
+	res, err := m.client.ModuleExecute(ctx, c.ModuleType, c.Module, opts)
+	if err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal([]byte(txt), &v); err != nil {
-		return txt, false
+	if job, ok := res["job_id"]; ok {
+		return fmt.Sprintf(`{"job_id":%v,"uuid":"%v"}`, job, res["uuid"]), nil
 	}
-	return v.Data, v.Busy
+	return fmt.Sprint(res), nil
 }
 
 func (s *Server) msfSessionEvidence(ctx context.Context, sess *msfSession, id string) string {
-	cmds := []string{"whoami\r\n", "hostname\r\n", "ipconfig\r\n"}
+	cmds := []string{"whoami", "hostname", "ipconfig"}
 	var last string
 	for attempt := 0; attempt < 8; attempt++ {
 		select {
@@ -688,28 +574,36 @@ func (s *Server) msfSessionEvidence(ctx context.Context, sess *msfSession, id st
 			return last
 		}
 		for _, cmd := range cmds {
-			txt, err := sess.call(ctx, "interact_session", map[string]any{"session_id": id, "command": cmd})
+			out, err := sess.runSessionCommand(ctx, id, cmd)
 			if err != nil {
 				continue
 			}
-			if out := sessionOutput(txt); out != "" {
+			if out = strings.TrimSpace(out); out != "" {
 				last = out
-				return strings.TrimSpace(last)
+				return out
 			}
 		}
 	}
-	log.Printf("[msf] 会话 %s 取证为空（interact_session 连续 8 轮无输出）", id)
+	log.Printf("[msf] 会话 %s 取证为空（连续 8 轮无输出）", id)
 	return last
 }
 
-func sessionOutput(txt string) string {
-	var v struct {
-		Output string `json:"output"`
+// runSessionCommand picks the write/read pair that matches the session kind.
+// Shells need CRLF-terminated lines on Windows targets, so both forms are sent
+// for shell sessions (an extra blank line is harmless on Linux).
+func (m *msfSession) runSessionCommand(ctx context.Context, id, cmd string) (string, error) {
+	sessions, err := m.client.Sessions(ctx)
+	if err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal([]byte(txt), &v); err == nil {
-		return strings.TrimSpace(v.Output)
+	s, ok := sessions[id]
+	if !ok {
+		return "", fmt.Errorf("会话 %s 已不存在", id)
 	}
-	return strings.TrimSpace(txt)
+	if s.Type == "meterpreter" {
+		return m.client.SessionCommand(ctx, id, s.Type, cmd)
+	}
+	return m.client.SessionCommand(ctx, id, "shell", cmd+"\r\n")
 }
 
 func (s *Server) msfRecordSessionFact(ctx context.Context, plan msf.Plan, sessionID, evidence string) {
